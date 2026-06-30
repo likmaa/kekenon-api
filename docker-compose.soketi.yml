@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  soketi:
+    image: quay.io/soketi/soketi:1.0-16-debian
+    restart: unless-stopped
+    environment:
+      APP_ID: "${PUSHER_APP_ID}"
+      APP_KEY: "${PUSHER_APP_KEY}"
+      APP_SECRET: "${PUSHER_APP_SECRET}"
+      DEBUG: "1"
+      DEFAULT_APP_PORT: 6001
+      DEFAULT_APP_TRANSPORTS: "ws,wss"
+      SOKETI_DEFAULT_APP_ID: "${PUSHER_APP_ID}"
+      SOKETI_DEFAULT_APP_KEY: "${PUSHER_APP_KEY}"
+      SOKETI_DEFAULT_APP_SECRET: "${PUSHER_APP_SECRET}"
+      SOKETI_DEFAULT_APP_MAX_CONNECTIONS: 1000
+      SOKETI_DEBUG: "1"
+      SOKETI_METRICS_SERVER_PORT: 9601
+    labels:
+      - "coolify.managed=true"
+      - "caddy:ws.kekenon.com"
+      - "caddy.reverse_proxy={{upstreams 6001}}"
+    ports:
+      - "6001:6001"
+      - "9601:9601"

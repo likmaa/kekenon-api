@@ -1,0 +1,4 @@
+# Ne jamais committer de certificats ou clés privées.
+*.pem
+*.crt
+*.key

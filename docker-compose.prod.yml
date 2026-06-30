@@ -1,0 +1,52 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.production
+      target: production
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+    volumes:
+      - app-storage:/var/www/html/storage/app
+      # TLS : l'image embarque des certificats auto-signes. Pour Lets Encrypt / certificat reel, decommenter :
+      # - ./docker/nginx/ssl:/etc/nginx/ssl:ro
+      # (le repertoire doit contenir fullchain.pem et privkey.pem — voir docker/nginx/README.md)
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - kekenon
+
+  mysql:
+    image: mysql/mysql-server:8.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: "${DB_PASSWORD}"
+      MYSQL_DATABASE: "${DB_DATABASE}"
+      MYSQL_USER: "${DB_USERNAME}"
+      MYSQL_PASSWORD: "${DB_PASSWORD}"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./docker/backups:/backups
+    networks:
+      - kekenon
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-p${DB_PASSWORD}"]
+      interval: 10s
+      retries: 3
+      timeout: 5s
+
+networks:
+  kekenon:
+    driver: bridge
+
+volumes:
+  app-storage:
+  mysql-data:

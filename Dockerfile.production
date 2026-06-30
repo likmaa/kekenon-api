@@ -1,0 +1,62 @@
+FROM php:8.4-fpm-alpine AS base
+
+RUN apk add --no-cache \
+    nginx \
+    supervisor \
+    libpng-dev \
+    libjpeg-turbo-dev \
+    freetype-dev \
+    oniguruma-dev \
+    libzip-dev \
+    curl-dev \
+    mysql-client \
+    $PHPIZE_DEPS \
+    && docker-php-ext-configure gd --with-freetype --with-jpeg \
+    && docker-php-ext-install pdo_mysql mbstring gd zip bcmath opcache curl \
+    && pecl install redis \
+    && docker-php-ext-enable redis
+
+COPY docker/php/opcache.ini /usr/local/etc/php/conf.d/opcache.ini
+COPY docker/php/php-prod.ini /usr/local/etc/php/conf.d/zz-prod.ini
+
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+WORKDIR /var/www/html
+
+FROM base AS build
+
+COPY composer.json composer.lock ./
+RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist
+
+COPY . .
+# NB: pas de `config:cache` au build — le .env de prod n'existe pas ici, ça bakerait
+# les valeurs par défaut (CACHE_STORE=database→sqlite) et casserait l'API en prod.
+# La config est lue live au runtime (voir config:clear dans le déploiement).
+RUN composer dump-autoload --optimize --no-dev \
+    && php artisan route:cache \
+    && php artisan view:cache
+
+FROM base AS production
+
+COPY --from=build /var/www/html /var/www/html
+
+COPY docker/nginx/default.conf /etc/nginx/http.d/default.conf
+COPY docker/supervisord.conf /etc/supervisord.conf
+
+# INFRA-03 : certificats TLS par defaut (auto-signes) pour que Nginx ecoute :443 au demarrage.
+# Remplacer en prod par un volume montant fullchain.pem + privkey.pem (Lets Encrypt) — voir docker/nginx/README.md
+RUN apk add --no-cache openssl \
+    && mkdir -p /etc/nginx/ssl \
+    && openssl req -x509 -nodes -days 397 -newkey rsa:2048 \
+        -keyout /etc/nginx/ssl/privkey.pem \
+        -out /etc/nginx/ssl/fullchain.pem \
+        -subj '/CN=api.kekenon.com/O=Kekenon/C=BJ' \
+    && chmod 644 /etc/nginx/ssl/fullchain.pem \
+    && chmod 640 /etc/nginx/ssl/privkey.pem
+
+RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache \
+    && chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache
+
+EXPOSE 80 443
+
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]

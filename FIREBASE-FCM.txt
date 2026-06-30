@@ -1,0 +1,38 @@
+Configuration FCM (push hors app) — Kêkênon / projet Firebase « kekenon »
+================================================================================
+
+1) Firebase Console (même projet que l’app Android : kekenon)
+   https://console.firebase.google.com/project/kekenon/settings/serviceaccounts/adminsdk
+
+2) Onglet « Comptes de service » → bouton « Générer une nouvelle clé privée »
+   → un fichier JSON est téléchargé (compte de service Google Cloud).
+
+3) Copier ce fichier vers le backend (NE PAS le committer ; déjà dans .gitignore) :
+   backend/storage/app/firebase-service-account.json
+
+4) Le fichier backend/.env doit contenir (déjà prévu par défaut) :
+   FIREBASE_SERVICE_ACCOUNT_PATH=storage/app/firebase-service-account.json
+   Laisser FIREBASE_SERVICE_ACCOUNT_JSON vide si vous utilisez le fichier.
+
+5) Vérifier depuis le dossier backend :
+   php artisan fcm:ping
+   (ou avec Sail : ./vendor/bin/sail artisan fcm:ping)
+
+6) iOS — App passager (Expo)
+   - Le dépôt contient déjà GoogleService-Info.plist (bundle com.kekenon.passenger).
+   - app.json référence ce fichier via ios.googleServicesFile (nécessaire au prebuild / EAS pour FCM côté iOS).
+   - Reconstruire un binaire iOS après changement : eas build --platform ios --profile development|preview|production
+
+7) iOS — Lier Apple Push (APNs) à Firebase (obligatoire pour recevoir les pushes sur iPhone)
+   A) Apple Developer (https://developer.apple.com/account/resources/authkeys/list)
+      - Identifiers → vérifier que l’App ID com.kekenon.passenger a la capacité « Push Notifications ».
+      - Keys → « + » → cocher « Apple Push Notifications service (APNs) » → enregistrer.
+      - Télécharger le fichier .p8 (une seule fois) : noter Key ID et l’équipe Team ID (page Membership).
+
+   B) Firebase Console → Paramètres du projet → onglet « Cloud Messaging »
+      - Section « Apple app configuration » (ou configuration APNs) pour l’app iOS kekenon.
+      - Importer la clé APNs : fichier .p8, Key ID, Team ID, bundle com.kekenon.passenger.
+
+   C) Sans cette étape B, Android peut recevoir les FCM « data » mais iOS ne affiche souvent rien en arrière-plan.
+
+8) Après dépôt du JSON backend : php artisan config:clear
