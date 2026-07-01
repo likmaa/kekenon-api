@@ -98,7 +98,7 @@ class StatsController extends Controller
         $avgAssignmentSec = (float) Ride::query()
             ->whereNotNull('accepted_at')
             ->whereBetween('accepted_at', [$startOfDay, $endOfDay])
-            ->selectRaw('AVG(TIMESTAMPDIFF(SECOND, created_at, accepted_at)) as avg_sec')
+            ->selectRaw(DB::connection()->getDriverName() === 'sqlite' ? "AVG(strftime('%s', accepted_at) - strftime('%s', created_at)) as avg_sec" : "AVG(TIMESTAMPDIFF(SECOND, created_at, accepted_at)) as avg_sec")
             ->value('avg_sec');
         $avgAssignmentSec = $avgAssignmentSec > 0 ? (int) round($avgAssignmentSec) : null;
 
@@ -357,20 +357,20 @@ class StatsController extends Controller
         $avgAssignmentSec = (float) Ride::query()
             ->whereNotNull('accepted_at')
             ->whereBetween('accepted_at', [$start, $end])
-            ->selectRaw('AVG(TIMESTAMPDIFF(SECOND, created_at, accepted_at)) as v')
+            ->selectRaw(DB::connection()->getDriverName() === 'sqlite' ? "AVG(strftime('%s', accepted_at) - strftime('%s', created_at)) as v" : "AVG(TIMESTAMPDIFF(SECOND, created_at, accepted_at)) as v")
             ->value('v');
 
         $avgPickupSec = (float) Ride::query()
             ->whereNotNull('accepted_at')
             ->whereNotNull('started_at')
             ->whereBetween('started_at', [$start, $end])
-            ->selectRaw('AVG(TIMESTAMPDIFF(SECOND, accepted_at, started_at)) as v')
+            ->selectRaw(DB::connection()->getDriverName() === 'sqlite' ? "AVG(strftime('%s', started_at) - strftime('%s', accepted_at)) as v" : "AVG(TIMESTAMPDIFF(SECOND, accepted_at, started_at)) as v")
             ->value('v');
 
         $refusedRides = (int) Ride::query()
             ->whereBetween('created_at', [$start, $end])
             ->whereNotNull('declined_driver_ids')
-            ->whereRaw('JSON_LENGTH(declined_driver_ids) > 0')
+            ->whereRaw(DB::connection()->getDriverName() === 'sqlite' ? "declined_driver_ids != '[]' AND declined_driver_ids IS NOT NULL" : "JSON_LENGTH(declined_driver_ids) > 0")
             ->count();
 
         // Expirées : auto-annulées par le scheduler `rides:expire` (timeout sans chauffeur)
@@ -405,7 +405,7 @@ class StatsController extends Controller
             ->where('status', 'completed')
             ->whereBetween('completed_at', [$start, $end])
             ->whereNotNull('started_at')
-            ->selectRaw('AVG(TIMESTAMPDIFF(SECOND, started_at, completed_at)) as v')
+            ->selectRaw(DB::connection()->getDriverName() === 'sqlite' ? "AVG(strftime('%s', completed_at) - strftime('%s', started_at)) as v" : "AVG(TIMESTAMPDIFF(SECOND, started_at, completed_at)) as v")
             ->value('v');
 
         $avgDistanceM = (float) (clone $completedQuery)->where('distance_m', '>', 0)->avg('distance_m');
@@ -459,7 +459,7 @@ class StatsController extends Controller
             case 'refused':
                 $q->whereBetween('created_at', [$from, $to])
                     ->whereNotNull('declined_driver_ids')
-                    ->whereRaw('JSON_LENGTH(declined_driver_ids) > 0');
+                    ->whereRaw(DB::connection()->getDriverName() === 'sqlite' ? "declined_driver_ids != '[]' AND declined_driver_ids IS NOT NULL" : "JSON_LENGTH(declined_driver_ids) > 0");
                 $dateField = 'created_at';
                 break;
             case 'expired':
@@ -690,7 +690,7 @@ class StatsController extends Controller
             ->whereNotNull('accepted_at')->whereNotNull('started_at')
             ->whereBetween('started_at', [$start, $end])
             ->whereNotNull('driver_id')
-            ->selectRaw('driver_id, AVG(TIMESTAMPDIFF(SECOND, accepted_at, started_at)) as avg_pickup')
+            ->selectRaw(DB::connection()->getDriverName() === 'sqlite' ? "driver_id, AVG(strftime('%s', started_at) - strftime('%s', accepted_at)) as avg_pickup" : "driver_id, AVG(TIMESTAMPDIFF(SECOND, accepted_at, started_at)) as avg_pickup")
             ->groupBy('driver_id')->get()->keyBy('driver_id');
 
         $ratings = DB::table('ratings')
@@ -825,7 +825,7 @@ class StatsController extends Controller
         $avgAssignmentSec = (float) Ride::query()
             ->whereNotNull('accepted_at')
             ->whereBetween('accepted_at', [$now->copy()->startOfDay(), $now->copy()->endOfDay()])
-            ->selectRaw('AVG(TIMESTAMPDIFF(SECOND, created_at, accepted_at)) as v')
+            ->selectRaw(DB::connection()->getDriverName() === 'sqlite' ? "AVG(strftime('%s', accepted_at) - strftime('%s', created_at)) as v" : "AVG(TIMESTAMPDIFF(SECOND, created_at, accepted_at)) as v")
             ->value('v');
 
         // Zones (grille ~1km, demandes des 6 dernières heures vs chauffeurs dispo)

@@ -21,7 +21,7 @@ class AdminAuthController extends Controller
             return response()->json(['message' => 'Email ou téléphone requis'], 422);
         }
 
-        $query = User::query()->whereIn('role', ['admin', 'developer']);
+        $query = User::query()->whereIn('role', ['admin', 'developer', 'super-admin', 'support']);
         if (!empty($data['email'])) {
             $query->where('email', $data['email']);
         } else {
@@ -34,6 +34,8 @@ class AdminAuthController extends Controller
         }
 
         $token = $user->createToken('admin')->plainTextToken;
+        
+        $user->load('roles', 'permissions');
 
         return response()->json([
             'token' => $token,
@@ -44,6 +46,8 @@ class AdminAuthController extends Controller
                 'phone' => $user->phone,
                 'role' => $user->role,
                 'photo' => $user->photo,
+                'roles' => $user->roles->pluck('name'),
+                'permissions' => $user->getAllPermissions()->pluck('name'),
             ],
         ]);
     }
@@ -58,6 +62,8 @@ class AdminAuthController extends Controller
     public function me(Request $request)
     {
         $u = $request->user();
+        $u->load('roles', 'permissions');
+        
         return response()->json([
             'id' => $u->id,
             'name' => $u->name,
@@ -65,6 +71,8 @@ class AdminAuthController extends Controller
             'phone' => $u->phone,
             'role' => $u->role,
             'photo' => $u->photo,
+            'roles' => $u->roles->pluck('name'),
+            'permissions' => $u->getAllPermissions()->pluck('name'),
         ]);
     }
 }

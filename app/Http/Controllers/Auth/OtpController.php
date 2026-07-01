@@ -42,6 +42,16 @@ class OtpController extends Controller
 
 
         try {
+            if (env('OTP_BYPASS', false)) {
+                $mockKey = 'mock-key-' . rand(100000, 999999);
+                cache()->put('kya_otp_key_' . $phone, $mockKey, now()->addMinutes(10));
+                return response()->json([
+                    'status' => 'otp_sent',
+                    'message' => 'OTP bypass activé. Utilisez le code 123456.',
+                    'otp_key' => $mockKey,
+                ]);
+            }
+
             // Pour l'application driver, on force TOUJOURS l'envoi d'OTP
             // même si le numéro est déjà vérifié, pour garantir le flux OTP complet
             // On ne saute jamais l'OTP pour l'app driver
@@ -101,6 +111,13 @@ class OtpController extends Controller
 
         if ($isReviewBypass) {
             $verifyResponse = ['reason' => 'success', 'status' => 200, 'msg' => 'checked'];
+        } elseif (env('OTP_BYPASS', false)) {
+            $cachedKey = cache()->get('kya_otp_key_' . $phone);
+            if ($cachedKey === $data['otp_key'] && (string)$data['code'] === '123456') {
+                $verifyResponse = ['reason' => 'success', 'status' => 200, 'msg' => 'checked'];
+            } else {
+                $verifyResponse = ['reason' => 'error', 'status' => 102, 'msg' => 'code incorrect (bypass active: 123456)'];
+            }
         } else {
             // Vérifier l'OTP auprès de KYA SMS en utilisant la clé retournée par /otp/create
             $verifyResponse = $this->kyaSms->verifyOtp($data['otp_key'], $data['code']);

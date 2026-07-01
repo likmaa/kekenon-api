@@ -14,6 +14,7 @@ class DriverModerationController extends Controller
         $drivers = User::query()
             ->join('driver_profiles', 'driver_profiles.user_id', '=', 'users.id')
             ->where('driver_profiles.status', 'pending')
+            ->whereNotNull('driver_profiles.license_number')
             ->select(
                 'users.id',
                 'users.name',
@@ -52,8 +53,10 @@ class DriverModerationController extends Controller
     public function online(Request $request)
     {
         $query = User::query()
-            ->where('role', 'driver')
-            ->leftJoin('driver_profiles', 'driver_profiles.user_id', '=', 'users.id')
+            ->where('users.role', 'driver')
+            ->join('driver_profiles', 'driver_profiles.user_id', '=', 'users.id')
+            ->where('driver_profiles.status', 'approved')
+            ->whereNotNull('driver_profiles.contract_accepted_at')
             ->select(
                 'users.id',
                 'users.name',

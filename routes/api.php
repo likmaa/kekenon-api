@@ -62,7 +62,7 @@ Route::prefix('admin')->group(function () {
     // Admin authentication (email/phone + password)
     Route::post('/login', [AdminAuthController::class, 'login'])->middleware('throttle:5,1');
 
-    Route::middleware(['auth:sanctum', 'role:admin,developer'])->group(function () {
+    Route::middleware(['auth:sanctum', 'role:admin,developer,super-admin'])->group(function () {
         // Authenticated admin endpoints
         Route::post('/logout', [AdminAuthController::class, 'logout']);
         Route::get('/me', [AdminAuthController::class, 'me']);
@@ -139,6 +139,13 @@ Route::prefix('admin')->group(function () {
         // Settings
         Route::get('/settings', [\App\Http\Controllers\Admin\SettingsController::class, 'index']);
         Route::post('/settings', [\App\Http\Controllers\Admin\SettingsController::class, 'update']);
+        
+        // Roles & Permissions (RBAC)
+        Route::get('/roles-permissions/roles', [\App\Http\Controllers\Admin\RolePermissionController::class, 'index']);
+        Route::get('/roles-permissions/permissions', [\App\Http\Controllers\Admin\RolePermissionController::class, 'getPermissions']);
+        Route::post('/roles-permissions/roles/{role}/sync', [\App\Http\Controllers\Admin\RolePermissionController::class, 'syncRolePermissions']);
+        Route::get('/roles-permissions/staff', [\App\Http\Controllers\Admin\RolePermissionController::class, 'getStaffUsers']);
+        Route::post('/roles-permissions/users/{user}/assign', [\App\Http\Controllers\Admin\RolePermissionController::class, 'assignRoleToUser']);
 
         // Driver Wallet & Debt Management
         Route::get('/drivers/debts', [\App\Http\Controllers\Admin\WalletController::class, 'driversDebts']);

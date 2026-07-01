@@ -17,7 +17,17 @@ class RoleMiddleware
     {
         $user = $request->user();
 
-        if (!$user || !in_array((string)($user->role ?? ''), $roles, true)) {
+        if (!$user) {
+            return response()->json(['message' => 'Accès refusé'], 403);
+        }
+
+        // Check against the static role column
+        $hasStaticRole = in_array((string)($user->role ?? ''), $roles, true);
+        
+        // Check against Spatie roles if the trait is used
+        $hasSpatieRole = method_exists($user, 'hasAnyRole') && $user->hasAnyRole($roles);
+
+        if (!$hasStaticRole && !$hasSpatieRole) {
             return response()->json(['message' => 'Accès refusé'], 403);
         }
 
