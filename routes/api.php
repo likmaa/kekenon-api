@@ -37,6 +37,7 @@ use App\Http\Controllers\SubscriptionController;
 Route::get('/health', fn() => response()->json(['status' => 'ok', 'timestamp' => now()]));
 Route::get('/app/version-check', [AppVersionController::class, 'show'])->middleware('throttle:120,1');
 Route::get('/promotions', [PromotionController::class, 'indexPublic']);
+Route::get('/economic-model', [\App\Http\Controllers\SettingController::class, 'getEconomicModel']);
 
 // Servir les fichiers de stockage via l'API (photos de profil, etc.)
 Route::get('/storage/{path}', [StorageController::class, 'show'])->where('path', '.*');

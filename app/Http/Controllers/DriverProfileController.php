@@ -7,9 +7,14 @@ use App\Models\DriverProfile;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use App\Services\EconomicModelService;
 
 class DriverProfileController extends Controller
 {
+    public function __construct(private EconomicModelService $economicModel)
+    {
+    }
+
     /**
      * Display the driver's profile.
      */
@@ -17,6 +22,7 @@ class DriverProfileController extends Controller
     {
         $user = $request->user();
         $profile = $user->driverProfile;
+        $businessModel = $this->economicModel->get();
 
         return response()->json([
             'user' => [
@@ -41,6 +47,9 @@ class DriverProfileController extends Controller
                 'documents' => $profile->documents,
                 'contract_accepted_at' => $profile->contract_accepted_at,
                 'subscription_remaining_rides' => (int) $profile->subscription_remaining_rides,
+                'subscription_pack_price' => $businessModel['driver_pack_price'],
+                'subscription_pack_rides' => $businessModel['driver_pack_rides'],
+                'driver_ride_share_pct' => $businessModel['driver_ride_share_pct'],
                 'created_at' => $profile->created_at,
                 'updated_at' => $profile->updated_at,
             ] : null,

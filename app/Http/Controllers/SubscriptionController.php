@@ -7,21 +7,23 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use App\Services\EconomicModelService;
 
 class SubscriptionController extends Controller
 {
+    public function __construct(private EconomicModelService $economicModel)
+    {
+    }
+
     protected function apiError(string $code, string $message, int $status): \Illuminate\Http\JsonResponse
     {
         return response()->json(['ok' => false, 'code' => $code, 'message' => $message], $status);
     }
 
-    /** Prix de l'abonnement (10 courses). */
-    private const SUBSCRIPTION_PRICE = 500;
-
     /**
      * POST /driver/subscription/renew
      *
-     * Renouvelle l'abonnement du chauffeur : débite 500 F et ajoute 10 courses au compteur.
+     * Renouvelle le pack du chauffeur selon les valeurs configurées dans le panel.
      * Le solde principal est débité en premier ; si insuffisant (ex. portefeuille à 0),
      * le solde bonus couvre le reste.
      */
@@ -36,7 +38,9 @@ class SubscriptionController extends Controller
 
         try {
             return DB::transaction(function () use ($driver) {
-                $price = self::SUBSCRIPTION_PRICE;
+                $businessModel = $this->economicModel->get();
+                $price = (int) $businessModel['driver_pack_price'];
+                $packRides = (int) $businessModel['driver_pack_rides'];
 
                 // Verrouiller le portefeuille pour mise à jour
                 $wallet = DB::table('wallets')
@@ -79,7 +83,7 @@ class SubscriptionController extends Controller
                         'amount' => $fromBalance,
                         'balance_before' => $balance,
                         'balance_after' => $afterBalance,
-                        'meta' => json_encode(['desc' => 'Abonnement 10 courses Kêkênon', 'bonus_used' => $fromBonus]),
+                        'meta' => json_encode(['desc' => "Pack {$packRides} courses Kêkênon", 'bonus_used' => $fromBonus]),
                         'created_at' => now(),
                     ]);
                 }
@@ -101,7 +105,7 @@ class SubscriptionController extends Controller
                     ]);
                 }
 
-                // 3. Créditer les 10 courses au compteur
+                // 3. Créditer le nombre de courses configuré au compteur
                 $profile = DB::table('driver_profiles')
                     ->where('user_id', $driver->id)
                     ->lockForUpdate()
@@ -111,7 +115,7 @@ class SubscriptionController extends Controller
                     return $this->apiError('PROFILE_NOT_FOUND', 'Profil de chauffeur introuvable.', 404);
                 }
 
-                $newRidesCount = (int) $profile->subscription_remaining_rides + 10;
+                $newRidesCount = (int) $profile->subscription_remaining_rides + $packRides;
 
                 DB::table('driver_profiles')
                     ->where('id', $profile->id)
@@ -132,9 +136,11 @@ class SubscriptionController extends Controller
                 return response()->json([
                     'ok' => true,
                     'message' => $fromBonus > 0
-                        ? "Abonnement activé (dont {$fromBonus} F payés avec votre bonus) : 10 courses supplémentaires."
-                        : 'Votre abonnement a été activé avec succès pour 10 courses supplémentaires.',
+                        ? "Pack activé (dont {$fromBonus} F payés avec votre bonus) : {$packRides} courses supplémentaires."
+                        : "Votre pack a été activé avec succès pour {$packRides} courses supplémentaires.",
                     'subscription_remaining_rides' => $newRidesCount,
+                    'driver_pack_price' => $price,
+                    'driver_pack_rides' => $packRides,
                     'wallet_balance' => $afterBalance,
                     'bonus_balance' => $afterBonus,
                     'bonus_used' => $fromBonus,

@@ -147,9 +147,12 @@ class TripsController extends Controller
 
         $user = Auth::guard('sanctum')->user();
         $eligibleForFirstRideDiscount = $this->passengerBonusService->isEligible($user);
+        $businessModel = app(\App\Services\EconomicModelService::class)->get();
 
         return response()->json([
             'price' => $price,
+            'passenger_app_fee' => $businessModel['passenger_app_fee'],
+            'estimated_total_with_app_fee' => $price + $businessModel['passenger_app_fee'],
             'currency' => 'XOF',
             'eta_s' => (int) round($duration),
             'distance_m' => (int) round($distance),
@@ -240,9 +243,12 @@ class TripsController extends Controller
 
         $user = Auth::guard('sanctum')->user();
         $eligibleForFirstRideDiscount = $this->passengerBonusService->isEligible($user);
+        $businessModel = app(\App\Services\EconomicModelService::class)->get();
 
         return response()->json([
             'price'      => $totalPrice,
+            'passenger_app_fee' => $businessModel['passenger_app_fee'],
+            'estimated_total_with_app_fee' => $totalPrice + $businessModel['passenger_app_fee'],
             'currency'   => 'XOF',
             'eta_s'      => (int) round($duration),
             'distance_m' => (int) round($distance),
@@ -586,9 +592,10 @@ class TripsController extends Controller
         // Vérification de l'abonnement du chauffeur
         $remainingRides = (int) DB::table('driver_profiles')->where('user_id', $driver->id)->value('subscription_remaining_rides');
         if ($remainingRides <= 0) {
+            $packPrice = (int) app(\App\Services\EconomicModelService::class)->get()['driver_pack_price'];
             return response()->json([
                 'code' => 'subscription_block',
-                'message' => 'Votre abonnement est épuisé. Veuillez renouveler votre abonnement de 500 F pour recevoir des courses.',
+                'message' => "Votre pack est épuisé. Renouvelez-le pour {$packPrice} F afin de recevoir des courses.",
             ], 403);
         }
 
@@ -975,8 +982,36 @@ class TripsController extends Controller
         /** @var User|null $driver */
         $driver = Auth::user();
         $ride = Ride::findOrFail($id);
-        if ($ride->driver_id !== ($driver?->id) || $ride->status !== 'ongoing') {
+        if ($ride->driver_id !== ($driver?->id)) {
             return response()->json(['message' => 'Invalid state'], 422);
+        }
+
+        // Idempotence réseau : si le premier appel a abouti mais que sa réponse s'est
+        // perdue, le retry du zem doit rouvrir le reçu au lieu d'afficher Invalid state.
+        if ($ride->status === 'completed') {
+            return response()->json([
+                'ok' => true,
+                'ride_id' => $ride->id,
+                'status' => $ride->status,
+                'earned' => (int) ($ride->driver_earnings_amount ?? 0),
+                'payment_link' => $ride->payment_link,
+                'already_completed' => true,
+            ]);
+        }
+
+        // Compatibilité avec d'anciennes courses qui utilisaient `started` pour
+        // représenter exactement le même état métier que `ongoing`.
+        if ($ride->status === 'started') {
+            $ride->status = 'ongoing';
+            $ride->started_at ??= now();
+            $ride->save();
+        }
+
+        if ($ride->status !== 'ongoing') {
+            return response()->json([
+                'message' => 'Invalid state',
+                'status' => $ride->status,
+            ], 422);
         }
 
         try {
@@ -1938,7 +1973,7 @@ class TripsController extends Controller
             ->whereNotNull('users.last_lat')
             ->whereNotNull('users.last_lng')
             ->whereRaw("{$distanceFormula} <= ?", [$radius])
-            ->select('users.id', 'users.last_lat as lat', 'users.last_lng as lng', 'users.last_location_at')
+            ->select('users.id', 'users.last_lat as lat', 'users.last_lng as lng', 'users.last_location_at', 'driver_profiles.vehicle_type')
             ->selectRaw("{$distanceFormula} as distance_km")
             ->orderByRaw("{$distanceFormula} ASC")
             ->limit(10)
@@ -2133,9 +2168,6 @@ class TripsController extends Controller
                 'per_min' => (int) ($s?->per_min ?? 5),
                 'min_fare' => (int) ($s?->min_fare ?? 1000),
                 'luggage_unit_price' => (int) ($s?->luggage_unit_price ?? 500),
-                'platform_pct' => (int) ($s?->platform_commission_pct ?? 70),
-                'driver_pct' => (int) ($s?->driver_commission_pct ?? 20),
-                'maintenance_pct' => (int) ($s?->maintenance_commission_pct ?? 10),
                 'stop_rate_per_min' => (int) ($s?->stop_rate_per_min ?? 5),
                 'weather' => [
                     'enabled' => (bool) ($s?->weather_mode_enabled ?? false),

@@ -9,7 +9,8 @@ use Illuminate\Queue\SerializesModels;
 
 /**
  * Le chauffeur part chercher le passager (« Aller chercher mon client »).
- * Diffusé sur le canal privé du passager : côté client, un bouton « Suivre mon
+ * Diffusé sur le canal de la COURSE (private-ride.{id}) — celui que l'écran de
+ * suivi (DriverTracking) écoute déjà : côté client, un bouton « Suivre mon
  * chauffeur sur la carte » apparaît pour visualiser le déplacement en temps réel.
  */
 class RideEnroute implements ShouldBroadcastNow
@@ -26,7 +27,7 @@ class RideEnroute implements ShouldBroadcastNow
     public function broadcastOn(): array
     {
         return [
-            new PrivateChannel('rider.' . $this->riderId),
+            new PrivateChannel('ride.' . $this->rideId),
         ];
     }
 

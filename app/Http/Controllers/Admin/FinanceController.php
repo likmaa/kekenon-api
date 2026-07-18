@@ -47,6 +47,12 @@ class FinanceController extends Controller
             ->sum('fare_amount');
 
         $driverPayments = (int) (clone $rangeRides)->sum('driver_earnings_amount');
+        $rangeRevenue = $this->platformRevenueBetween($rangeFrom, $rangeTo);
+        $todayRevenue = $this->platformRevenueBetween($now->copy()->startOfDay(), $now->copy()->endOfDay());
+        $weekRevenue = $this->platformRevenueBetween($now->copy()->startOfWeek(), $now->copy()->endOfWeek());
+        $monthRevenue = $this->platformRevenueBetween($now->copy()->startOfMonth(), $now->copy()->endOfMonth());
+        $promoSubsidies = $this->promoSubsidiesBetween($rangeFrom, $rangeTo);
+        $rewardCosts = (int) DriverReward::query()->whereBetween('created_at', [$rangeFrom, $rangeTo])->sum('amount');
 
         return response()->json([
             'currency' => 'XOF',
@@ -57,6 +63,16 @@ class FinanceController extends Controller
             'cash_payments' => $cashPayments,
             'digital_payments' => $digitalPayments,
             'driver_payments' => $driverPayments,
+            'platform_revenue_today' => $todayRevenue['cash_revenue'],
+            'platform_revenue_week' => $weekRevenue['cash_revenue'],
+            'platform_revenue_month' => $monthRevenue['cash_revenue'],
+            'platform_revenue' => $rangeRevenue['cash_revenue'],
+            'passenger_app_fees' => $rangeRevenue['passenger_app_fees'],
+            'driver_pack_revenue' => $rangeRevenue['driver_pack_revenue'],
+            'bonus_consumed' => $rangeRevenue['bonus_consumed'],
+            'promo_subsidies' => $promoSubsidies,
+            'driver_rewards_cost' => $rewardCosts,
+            'net_platform_margin' => $rangeRevenue['cash_revenue'] - $promoSubsidies - $rewardCosts,
         ]);
     }
 
@@ -93,11 +109,21 @@ class FinanceController extends Controller
         $rows = [];
         foreach ($buckets as $b) {
             $q = Ride::query()->where('status', 'completed')->whereBetween('completed_at', [$b['start'], $b['end']]);
+            $revenue = $this->platformRevenueBetween($b['start'], $b['end']);
+            $promoSubsidies = $this->promoSubsidiesBetween($b['start'], $b['end']);
+            $rewardCosts = (int) DriverReward::query()->whereBetween('created_at', [$b['start'], $b['end']])->sum('amount');
             $rows[] = [
                 'label' => $b['label'],
                 'rides_count' => (int) (clone $q)->count(),
                 'gross_volume' => (int) (clone $q)->sum('fare_amount'),
-                'commission' => (int) (clone $q)->sum('commission_amount'),
+                'commission' => $revenue['cash_revenue'], // alias historique du panel
+                'platform_revenue' => $revenue['cash_revenue'],
+                'passenger_app_fees' => $revenue['passenger_app_fees'],
+                'driver_pack_revenue' => $revenue['driver_pack_revenue'],
+                'bonus_consumed' => $revenue['bonus_consumed'],
+                'promo_subsidies' => $promoSubsidies,
+                'driver_rewards_cost' => $rewardCosts,
+                'net_platform_margin' => $revenue['cash_revenue'] - $promoSubsidies - $rewardCosts,
                 'driver_earnings' => (int) (clone $q)->sum('driver_earnings_amount'),
                 'cash' => (int) (clone $q)->where(function ($x) {
                     $x->whereIn('payment_method', ['cash'])->orWhereNull('payment_method');
@@ -166,31 +192,42 @@ class FinanceController extends Controller
         $to = $request->query('to');
         $now = now();
 
-        $rangeFrom = $from ? $from : $now->copy()->startOfMonth()->toISOString();
-        $rangeTo = $to ? $to : $now->toISOString();
+        $rangeFrom = $from ? Carbon::parse($from) : $now->copy()->startOfMonth();
+        $rangeTo = $to ? Carbon::parse($to) : $now->copy();
 
         $ridesQuery = Ride::query()
             ->where('status', 'completed')
             ->whereBetween('completed_at', [$rangeFrom, $rangeTo]);
 
         $grossVolume = (int) $ridesQuery->sum('fare_amount');
-        $netRevenue = (int) $ridesQuery->sum('commission_amount');
+        $platformRevenue = $this->platformRevenueBetween($rangeFrom, $rangeTo);
+        $netRevenue = $platformRevenue['cash_revenue'];
         $ridesCount = (int) $ridesQuery->count();
 
         $commissionRate = $grossVolume > 0 ? ($netRevenue / $grossVolume) : 0.0;
 
-        $rewardsCount = (int) DriverReward::query()
+        $rewardsQuery = DriverReward::query()
             ->whereBetween('created_at', [$rangeFrom, $rangeTo])
-            ->count();
+            ;
+        $rewardsCount = (int) (clone $rewardsQuery)->count();
+        $rewardCosts = (int) (clone $rewardsQuery)->sum('amount');
+        $promoSubsidies = $this->promoSubsidiesBetween($rangeFrom, $rangeTo);
 
         return response()->json([
             'range' => [
-                'from' => $rangeFrom,
-                'to' => $rangeTo,
+                'from' => $rangeFrom->toIso8601String(),
+                'to' => $rangeTo->toIso8601String(),
             ],
             'gross_volume' => $grossVolume,
             'net_revenue' => $netRevenue,
             'commission_rate' => $commissionRate,
+            'monetization_rate' => $commissionRate,
+            'passenger_app_fees' => $platformRevenue['passenger_app_fees'],
+            'driver_pack_revenue' => $platformRevenue['driver_pack_revenue'],
+            'bonus_consumed' => $platformRevenue['bonus_consumed'],
+            'promo_subsidies' => $promoSubsidies,
+            'driver_rewards_cost' => $rewardCosts,
+            'net_platform_margin' => $netRevenue - $promoSubsidies - $rewardCosts,
             'rides_count' => $ridesCount,
             'payouts_pending' => $rewardsCount,
         ]);
@@ -228,7 +265,21 @@ class FinanceController extends Controller
                     'created_at',
                 ]);
 
-            return $ridesQuery->unionAll($rewardsQuery);
+            $platformFeesQuery = DB::table('wallet_transactions')
+                ->where('type', 'debit')
+                ->whereIn('source', ['app_fee', 'subscription_fee', 'subscription_fee_bonus'])
+                ->select([
+                    'id',
+                    'source as type',
+                    'amount',
+                    DB::raw("CASE WHEN source IN ('app_fee','subscription_fee') THEN amount ELSE 0 END as commission"),
+                    DB::raw('0 as payout'),
+                    DB::raw("'XOF' as currency"),
+                    DB::raw("'succeeded' as status"),
+                    'created_at',
+                ]);
+
+            return $ridesQuery->unionAll($rewardsQuery)->unionAll($platformFeesQuery);
         };
 
         $total = (int) DB::query()
@@ -267,5 +318,34 @@ class FinanceController extends Controller
             'per_page' => $perPage,
             'total' => $total,
         ]);
+    }
+
+    /** Revenus réellement encaissés par Kêkênon via le ledger portefeuille. */
+    private function platformRevenueBetween($from, $to): array
+    {
+        $query = DB::table('wallet_transactions')
+            ->where('type', 'debit')
+            ->whereBetween('created_at', [$from, $to]);
+
+        $passengerFees = (int) (clone $query)->where('source', 'app_fee')->sum('amount');
+        $driverPackRevenue = (int) (clone $query)->where('source', 'subscription_fee')->sum('amount');
+        $bonusConsumed = (int) (clone $query)->where('source', 'subscription_fee_bonus')->sum('amount');
+
+        return [
+            'cash_revenue' => $passengerFees + $driverPackRevenue,
+            'passenger_app_fees' => $passengerFees,
+            'driver_pack_revenue' => $driverPackRevenue,
+            'bonus_consumed' => $bonusConsumed,
+        ];
+    }
+
+    /** Coût des remises financées par la plateforme sans réduire le gain du zem. */
+    private function promoSubsidiesBetween($from, $to): int
+    {
+        return (int) (Ride::query()
+            ->where('status', 'completed')
+            ->whereBetween('completed_at', [$from, $to])
+            ->selectRaw('COALESCE(SUM(CASE WHEN driver_earnings_amount > fare_amount THEN driver_earnings_amount - fare_amount ELSE 0 END), 0) AS total')
+            ->value('total') ?? 0);
     }
 }

@@ -151,10 +151,11 @@ class WalletController extends Controller
             'topup_geniuspay' => 'Rechargement', // héritage : anciennes transactions
             'ride_tip' => 'Pourboire',
             'commission_deduction' => 'Commission',
-            'subscription_fee' => 'Abonnement (10 courses)',
+            'subscription_fee' => 'Pack de courses',
             'subscription_fee_bonus' => 'Abonnement (payé en bonus)',
             'bonus_grant' => 'Bonus offert',
             'app_fee' => 'Frais de plateforme',
+            'promo_subsidy' => 'Remise financée par Kêkênon',
             'withdrawal' => 'Retrait',
             'admin_reset' => 'Ajustement solde',
             'admin_adjustment' => 'Ajustement',

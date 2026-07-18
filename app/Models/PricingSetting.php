@@ -16,6 +16,9 @@ class PricingSetting extends Model
         'per_km',
         'per_min',
         'min_fare',
+        'passenger_app_fee',
+        'driver_pack_price',
+        'driver_pack_rides',
         'luggage_unit_price',
         'peak_hours_enabled',
         'peak_hours_multiplier',
@@ -45,6 +48,9 @@ class PricingSetting extends Model
         'peak_hours_enabled' => 'boolean',
         'peak_hours_multiplier' => 'float',
         'zones' => 'array',
+        'passenger_app_fee' => 'integer',
+        'driver_pack_price' => 'integer',
+        'driver_pack_rides' => 'integer',
         'platform_commission_pct' => 'integer',
         'driver_commission_pct' => 'integer',
         'maintenance_commission_pct' => 'integer',
@@ -62,4 +68,3 @@ class PricingSetting extends Model
         'inner_city_radius_km' => 'integer',
     ];
 }
-

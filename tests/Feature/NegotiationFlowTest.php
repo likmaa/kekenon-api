@@ -147,4 +147,60 @@ class NegotiationFlowTest extends TestCase
             ->assertStatus(422)
             ->assertJson(['code' => 'RIDE_NOT_AVAILABLE']);
     }
+
+    public function test_driver_complete_is_idempotent_after_network_retry(): void
+    {
+        $passenger = $this->makePassenger();
+        $driver = $this->makeDriver();
+        $ride = Ride::create([
+            'rider_id' => $passenger->id,
+            'driver_id' => $driver->id,
+            'status' => 'ongoing',
+            'pickup_lat' => 6.4038,
+            'pickup_lng' => 2.3278,
+            'dropoff_lat' => 6.3702,
+            'dropoff_lng' => 2.3912,
+            'distance_m' => 3000,
+            'vehicle_type' => 'standard',
+            'payment_method' => 'cash',
+            'started_at' => now()->subMinutes(10),
+        ]);
+
+        Sanctum::actingAs($driver);
+        $this->postJson("/api/driver/trips/{$ride->id}/complete", ['distance_m' => 3000])
+            ->assertOk()
+            ->assertJson(['ok' => true, 'status' => 'completed']);
+
+        $this->postJson("/api/driver/trips/{$ride->id}/complete", ['distance_m' => 3000])
+            ->assertOk()
+            ->assertJson([
+                'ok' => true,
+                'status' => 'completed',
+                'already_completed' => true,
+            ]);
+    }
+
+    public function test_driver_can_complete_legacy_started_ride(): void
+    {
+        $passenger = $this->makePassenger();
+        $driver = $this->makeDriver();
+        $ride = Ride::create([
+            'rider_id' => $passenger->id,
+            'driver_id' => $driver->id,
+            'status' => 'started',
+            'pickup_lat' => 6.4038,
+            'pickup_lng' => 2.3278,
+            'dropoff_lat' => 6.3702,
+            'dropoff_lng' => 2.3912,
+            'distance_m' => 3000,
+            'vehicle_type' => 'standard',
+            'payment_method' => 'cash',
+            'started_at' => now()->subMinutes(10),
+        ]);
+
+        Sanctum::actingAs($driver);
+        $this->postJson("/api/driver/trips/{$ride->id}/complete", ['distance_m' => 3000])
+            ->assertOk()
+            ->assertJson(['ok' => true, 'status' => 'completed']);
+    }
 }

@@ -6,10 +6,15 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use App\Models\PricingSetting;
+use App\Services\EconomicModelService;
 
 class PricingController extends Controller
 {
     protected string $cacheKey = 'pricing.config';
+
+    public function __construct(private EconomicModelService $economicModel)
+    {
+    }
 
     public function get()
     {
@@ -21,14 +26,17 @@ class PricingController extends Controller
                 'base_fare' => 700,
                 'per_km' => 200,
                 'min_fare' => 1000,
+                'passenger_app_fee' => EconomicModelService::DEFAULT_PASSENGER_APP_FEE,
+                'driver_pack_price' => EconomicModelService::DEFAULT_DRIVER_PACK_PRICE,
+                'driver_pack_rides' => EconomicModelService::DEFAULT_DRIVER_PACK_RIDES,
                 'zones' => [],
                 'peak_hours_enabled' => false,
                 'peak_hours_multiplier' => 1.0,
                 'peak_hours_start_time' => '17:00:00',
                 'peak_hours_end_time' => '20:00:00',
-                'platform_commission_pct' => 70,
-                'driver_commission_pct' => 20,
-                'maintenance_commission_pct' => 10,
+                'platform_commission_pct' => 0,
+                'driver_commission_pct' => 100,
+                'maintenance_commission_pct' => 0,
                 'weather_multiplier' => 1.0,
                 'weather_mode_enabled' => false,
                 'night_multiplier' => 1.0,
@@ -46,6 +54,7 @@ class PricingController extends Controller
             'stop_rate_per_min' => (int) ($setting->stop_rate_per_min ?? 5),
             'pickup_grace_period_m' => (int) ($setting->pickup_grace_period_m ?? 5),
             'pickup_waiting_rate_per_min' => (int) ($setting->pickup_waiting_rate_per_min ?? 10),
+            'business_model' => $this->economicModel->get(),
             'zones' => $setting->zones ?? [],
             'peak_hours' => [
                 'enabled' => (bool) $setting->peak_hours_enabled,
@@ -62,10 +71,13 @@ class PricingController extends Controller
                 'start_time' => substr((string) ($setting->night_start_time ?? '22:00'), 0, 5),
                 'end_time' => substr((string) ($setting->night_end_time ?? '06:00'), 0, 5),
             ],
+            // Compatibilité avec les anciennes versions du panel. Le moteur réel
+            // n'applique plus de commission proportionnelle sur le prix de la course.
             'commission' => [
-                'platform_pct' => (int) ($setting->platform_commission_pct ?? 70),
-                'driver_pct' => (int) ($setting->driver_commission_pct ?? 20),
-                'maintenance_pct' => (int) ($setting->maintenance_commission_pct ?? 10),
+                'enabled' => false,
+                'platform_pct' => 0,
+                'driver_pct' => 100,
+                'maintenance_pct' => 0,
             ],
             'out_of_city' => [
                 'enabled' => (bool) ($setting->out_of_city_enabled ?? false),
@@ -90,6 +102,10 @@ class PricingController extends Controller
             'stop_rate_per_min' => ['sometimes', 'integer', 'min:0'],
             'pickup_grace_period_m' => ['sometimes', 'integer', 'min:0'],
             'pickup_waiting_rate_per_min' => ['sometimes', 'integer', 'min:0'],
+            'business_model' => ['sometimes', 'array'],
+            'business_model.passenger_app_fee' => ['sometimes', 'integer', 'min:0', 'max:10000'],
+            'business_model.driver_pack_price' => ['sometimes', 'integer', 'min:0', 'max:1000000'],
+            'business_model.driver_pack_rides' => ['sometimes', 'integer', 'min:1', 'max:10000'],
             'zones' => ['sometimes', 'array'],
             'peak_hours' => ['sometimes', 'array'],
             'peak_hours.enabled' => ['sometimes', 'boolean'],
@@ -139,6 +155,18 @@ class PricingController extends Controller
         if (array_key_exists('pickup_waiting_rate_per_min', $data)) {
             $setting->pickup_waiting_rate_per_min = (int) $data['pickup_waiting_rate_per_min'];
         }
+        if (array_key_exists('business_model', $data)) {
+            $businessModel = $data['business_model'];
+            if (array_key_exists('passenger_app_fee', $businessModel)) {
+                $setting->passenger_app_fee = (int) $businessModel['passenger_app_fee'];
+            }
+            if (array_key_exists('driver_pack_price', $businessModel)) {
+                $setting->driver_pack_price = (int) $businessModel['driver_pack_price'];
+            }
+            if (array_key_exists('driver_pack_rides', $businessModel)) {
+                $setting->driver_pack_rides = (int) $businessModel['driver_pack_rides'];
+            }
+        }
         if (array_key_exists('zones', $data)) {
             $setting->zones = $data['zones'];
         }
@@ -173,15 +201,10 @@ class PricingController extends Controller
                 $setting->night_end_time = $n['end_time'] . ':00';
         }
 
-        if (array_key_exists('commission', $data)) {
-            $comm = $data['commission'];
-            if (array_key_exists('platform_pct', $comm))
-                $setting->platform_commission_pct = (int) $comm['platform_pct'];
-            if (array_key_exists('driver_pct', $comm))
-                $setting->driver_commission_pct = (int) $comm['driver_pct'];
-            if (array_key_exists('maintenance_pct', $comm))
-                $setting->maintenance_commission_pct = (int) $comm['maintenance_pct'];
-        }
+        // Modèle actuel : le zem conserve 100 % du prix de la course.
+        $setting->platform_commission_pct = 0;
+        $setting->driver_commission_pct = 100;
+        $setting->maintenance_commission_pct = 0;
 
         if (array_key_exists('out_of_city', $data)) {
             $oc = $data['out_of_city'];
@@ -207,4 +230,3 @@ class PricingController extends Controller
         return $this->get();
     }
 }
-

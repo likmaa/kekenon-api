@@ -22,7 +22,10 @@ use Illuminate\Support\Facades\Log;
  */
 class RideCompletionService
 {
-    public function __construct(private FcmService $fcm)
+    public function __construct(
+        private FcmService $fcm,
+        private EconomicModelService $economicModel,
+    )
     {
     }
 
@@ -54,9 +57,6 @@ class RideCompletionService
                     'per_km' => (int) ($s?->per_km ?? 200),
                     'per_min' => (int) ($s?->per_min ?? 5),
                     'min_fare' => (int) ($s?->min_fare ?? 1000),
-                    'platform_pct' => (int) ($s?->platform_commission_pct ?? 70),
-                    'driver_pct' => (int) ($s?->driver_commission_pct ?? 20),
-                    'maintenance_pct' => (int) ($s?->maintenance_commission_pct ?? 10),
                     'luggage_unit_price' => (int) ($s?->luggage_unit_price ?? 500),
                     'stop_rate_per_min' => (int) ($s?->stop_rate_per_min ?? 5),
                     'weather' => [
@@ -86,6 +86,7 @@ class RideCompletionService
                     'pickup_waiting_rate_per_min' => (int) ($s?->pickup_waiting_rate_per_min ?? 10),
                 ];
             });
+            $businessModel = $this->economicModel->get();
 
             // Distance facturée : PRIORITÉ à l'odomètre serveur (trace GPS réelle accumulée
             // depuis les pings pendant la course), sinon la valeur rapportée par l'app
@@ -188,21 +189,10 @@ class RideCompletionService
                 ? (int) $ride->negotiated_fare 
                 : ($trajectoryPrice + $timeFare + $stopPrice + $pickupWaitingPrice + $luggageFee);
 
-            // Application de la réduction (Promo Code ou First Ride)
-            $discountAmount = 0;
-            if ($ride->promo_code_id) {
-                $promo = \App\Models\PromoCode::find($ride->promo_code_id);
-                if ($promo) {
-                    if ($promo->type === 'percentage') {
-                        $discountAmount = $originalFare * ($promo->value / 100);
-                    } else {
-                        $discountAmount = $promo->value;
-                    }
-                }
-            } elseif ($ride->discount_amount > 0) {
-                // Si une réduction était présente sans code promo à la création, c'était le First Ride Discount (30%)
-                $discountAmount = $originalFare * 0.30;
-            }
+            // La remise est figée lors de la commande. On ne la recalcule jamais à
+            // la complétion : un changement de promo ou de grille ne doit pas modifier
+            // le prix déjà annoncé au passager.
+            $discountAmount = max(0, (float) ($ride->discount_amount ?? 0));
 
             if ($discountAmount > $originalFare) {
                 $discountAmount = $originalFare;
@@ -236,12 +226,48 @@ class RideCompletionService
                 'distance_source' => $distanceSource,
             ];
 
-            // 3. Pas de commissions sur le montant
-            $driverAmount = $fare; // Le chauffeur gagne 100% du prix convenu
+            // 3. Pas de commission sur le tarif : le zem conserve 100 % du prix
+            // avant remise. Une promotion Kêkênon est donc financée par la plateforme
+            // et ne réduit jamais le revenu du conducteur.
+            $driverAmount = (int) $originalFare;
             $ride->commission_amount = 0;
             $ride->driver_earnings_amount = $driverAmount;
             $ride->status = 'completed';
             $ride->completed_at = now();
+
+            // En espèces, le zem encaisse le montant remisé auprès du passager ; la
+            // différence est créditée sur son portefeuille comme subvention promotionnelle.
+            if (($ride->payment_method ?? 'cash') === 'cash' && $discountAmount > 0) {
+                $driverWallet = DB::table('wallets')->where('user_id', $driver->id)->lockForUpdate()->first();
+                if (!$driverWallet) {
+                    $driverWalletId = DB::table('wallets')->insertGetId([
+                        'user_id' => $driver->id,
+                        'balance' => 0,
+                        'currency' => $ride->currency ?? 'XOF',
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                    $driverWallet = (object) ['id' => $driverWalletId, 'balance' => 0];
+                }
+
+                $subsidy = (int) round($discountAmount);
+                $subsidyBefore = (int) $driverWallet->balance;
+                $subsidyAfter = $subsidyBefore + $subsidy;
+                DB::table('wallet_transactions')->insert([
+                    'wallet_id' => $driverWallet->id,
+                    'type' => 'credit',
+                    'source' => 'promo_subsidy',
+                    'amount' => $subsidy,
+                    'balance_before' => $subsidyBefore,
+                    'balance_after' => $subsidyAfter,
+                    'meta' => json_encode(['ride_id' => $ride->id, 'desc' => 'Remise passager financée par Kêkênon']),
+                    'created_at' => now(),
+                ]);
+                DB::table('wallets')->where('id', $driverWallet->id)->update([
+                    'balance' => $subsidyAfter,
+                    'updated_at' => now(),
+                ]);
+            }
 
             // Décrémenter l'abonnement du chauffeur de 1 course
             DB::table('driver_profiles')
@@ -249,12 +275,12 @@ class RideCompletionService
                 ->decrement('subscription_remaining_rides', 1);
 
             // Renouvellement automatique : avoir de l'argent (solde ou bonus) = avoir
-            // l'abonnement. Pack épuisé → 500 F prélevés (solde d'abord, bonus en
-            // complément) et 10 courses recréditées. Zéro dette : sans fonds
+            // le pack. À épuisement, le prix configuré est prélevé (solde d'abord,
+            // bonus en complément) et le nombre de courses configuré est recrédité. Sans fonds
             // suffisants, le compteur reste épuisé et l'app invite à recharger.
-            $this->autoRenewSubscriptionIfNeeded($driver->id, (int) $ride->id);
+            $this->autoRenewSubscriptionIfNeeded($driver->id, (int) $ride->id, $businessModel);
 
-            // Prélèvement de 25 F de frais de plateforme sur le portefeuille du passager
+            // Frais d'application passager, configurables depuis le panel.
             $passengerWallet = DB::table('wallets')->where('user_id', $ride->rider_id)->lockForUpdate()->first();
             if (!$passengerWallet) {
                 $pWid = DB::table('wallets')->insertGetId([
@@ -268,7 +294,8 @@ class RideCompletionService
             }
             // Modèle zéro dette : on ne prélève jamais au-delà du solde disponible.
             $pBefore = (int) $passengerWallet->balance;
-            $pFee = min(25, max(0, $pBefore));
+            $configuredPassengerFee = (int) $businessModel['passenger_app_fee'];
+            $pFee = min($configuredPassengerFee, max(0, $pBefore));
             if ($pFee > 0) {
                 $pAfter = $pBefore - $pFee;
                 DB::table('wallet_transactions')->insert([
@@ -278,7 +305,11 @@ class RideCompletionService
                     'amount' => $pFee,
                     'balance_before' => $pBefore,
                     'balance_after' => $pAfter,
-                    'meta' => json_encode(['ride_id' => $ride->id, 'desc' => 'Frais de plateforme Kêkênon']),
+                    'meta' => json_encode([
+                        'ride_id' => $ride->id,
+                        'desc' => 'Frais de plateforme Kêkênon',
+                        'configured_fee' => $configuredPassengerFee,
+                    ]),
                     'created_at' => now(),
                 ]);
                 DB::table('wallets')->where('id', $passengerWallet->id)->update([
@@ -359,16 +390,12 @@ class RideCompletionService
         return $result;
     }
 
-    /** Prix (F CFA) et taille (courses) du pack d'abonnement chauffeur. */
-    private const SUBSCRIPTION_PRICE = 500;
-    private const SUBSCRIPTION_RIDES = 10;
-
     /**
      * Renouvelle l'abonnement depuis le portefeuille dès que le pack est épuisé
      * (compteur ≤ 0) : débit du solde principal d'abord, bonus en complément.
      * Doit être appelé DANS la transaction de complétion.
      */
-    private function autoRenewSubscriptionIfNeeded(int $driverId, int $rideId): void
+    private function autoRenewSubscriptionIfNeeded(int $driverId, int $rideId, array $businessModel): void
     {
         $remaining = DB::table('driver_profiles')
             ->where('user_id', $driverId)
@@ -385,12 +412,14 @@ class RideCompletionService
 
         $balance = (int) $wallet->balance;
         $bonus = (int) ($wallet->bonus_balance ?? 0);
-        if ($balance + $bonus < self::SUBSCRIPTION_PRICE) {
+        $packPrice = (int) $businessModel['driver_pack_price'];
+        $packRides = (int) $businessModel['driver_pack_rides'];
+        if ($balance + $bonus < $packPrice) {
             return; // Zéro dette : pas de fonds, pas de renouvellement.
         }
 
-        $fromBalance = min($balance, self::SUBSCRIPTION_PRICE);
-        $fromBonus = self::SUBSCRIPTION_PRICE - $fromBalance;
+        $fromBalance = min($balance, $packPrice);
+        $fromBonus = $packPrice - $fromBalance;
         $afterBalance = $balance - $fromBalance;
         $afterBonus = $bonus - $fromBonus;
 
@@ -409,7 +438,7 @@ class RideCompletionService
                 'balance_before' => $balance,
                 'balance_after' => $afterBalance,
                 'meta' => json_encode([
-                    'desc' => 'Renouvellement auto — abonnement 10 courses',
+                    'desc' => "Renouvellement auto — pack {$packRides} courses",
                     'auto' => true,
                     'ride_id' => $rideId,
                     'bonus_used' => $fromBonus,
@@ -439,13 +468,15 @@ class RideCompletionService
 
         DB::table('driver_profiles')
             ->where('user_id', $driverId)
-            ->increment('subscription_remaining_rides', self::SUBSCRIPTION_RIDES);
+            ->increment('subscription_remaining_rides', $packRides);
 
         Log::info('Subscription auto-renewed from wallet', [
             'driver_id' => $driverId,
             'ride_id' => $rideId,
             'from_balance' => $fromBalance,
             'from_bonus' => $fromBonus,
+            'pack_price' => $packPrice,
+            'pack_rides' => $packRides,
         ]);
     }
 
