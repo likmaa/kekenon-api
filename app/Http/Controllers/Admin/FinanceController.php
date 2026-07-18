@@ -48,12 +48,6 @@ class FinanceController extends Controller
 
         $driverPayments = (int) (clone $rangeRides)->sum('driver_earnings_amount');
 
-        $globalDebt = (int) abs((float) DB::table('wallets')
-            ->join('users', 'users.id', '=', 'wallets.user_id')
-            ->where('users.role', 'driver')
-            ->where('wallets.balance', '<', 0)
-            ->sum('wallets.balance'));
-
         return response()->json([
             'currency' => 'XOF',
             'range' => ['from' => $rangeFrom->toIso8601String(), 'to' => $rangeTo->toIso8601String()],
@@ -63,7 +57,6 @@ class FinanceController extends Controller
             'cash_payments' => $cashPayments,
             'digital_payments' => $digitalPayments,
             'driver_payments' => $driverPayments,
-            'global_debt' => $globalDebt,
         ]);
     }
 
@@ -146,7 +139,6 @@ class FinanceController extends Controller
             ->orderByDesc('gross_revenue')
             ->get()
             ->map(function ($r) {
-                $balance = (float) ($r->wallet_balance ?? 0);
                 return [
                     'driver_id' => (int) $r->driver_id,
                     'driver_name' => $r->driver_name,
@@ -157,7 +149,6 @@ class FinanceController extends Controller
                     'platform_commission' => (int) $r->platform_commission,
                     'driver_earnings' => (int) $r->driver_earnings,
                     'distance_km' => round(((int) $r->distance_m) / 1000, 1),
-                    'debt_amount' => $balance < 0 ? (int) abs($balance) : 0,
                 ];
             })
             ->values();

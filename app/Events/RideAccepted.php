@@ -42,6 +42,9 @@ class RideAccepted implements ShouldBroadcastNow
 
         return [
             'rideId' => $this->ride->id,
+            // Permet au passager de router vers l'écran Confirmer/Refuser (négociation
+            // verbale) plutôt que le suivi direct, sans dépendre d'un état local.
+            'pricing_mode' => $this->ride->pricing_mode ?? 'fixed',
             'driver' => $driver ? [
                 'id' => $driver->id,
                 'name' => $driver->name,

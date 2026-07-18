@@ -20,10 +20,36 @@ Artisan::command('rides:expire', function () {
             'cancellation_reason' => 'timeout_no_driver'
         ]);
 
-        broadcast(new \App\Events\RideCancelled($ride, 'system'));
+        rescue(fn () => broadcast(new \App\Events\RideCancelled($ride, 'system')));
         $this->info("Expired ride ID: {$ride->id}");
     }
 })->purpose('Expire ride requests in "requested" older than 10 minutes (timeout_no_driver)');
+
+Artisan::command('rides:simulate-arrival', function () {
+    /** @var \App\Models\Ride|null $ride */
+    $ride = \App\Models\Ride::where('status', 'accepted')->latest()->first();
+
+    if (! $ride) {
+        $this->warn('Aucune course au statut "accepted" trouvée.');
+
+        return 1;
+    }
+
+    $ride->update([
+        'status' => 'arrived',
+        'arrived_at' => now(),
+    ]);
+
+    rescue(fn () => broadcast(new \App\Events\RideArrived(
+        $ride->id,
+        $ride->rider_id,
+        $ride->arrived_at->toIso8601String()
+    )));
+
+    $this->info("Course #{$ride->id} marquée comme « arrived » et diffusée (dev).");
+
+    return 0;
+})->purpose('DEV — simule l’arrivée du chauffeur sur la dernière course "accepted"');
 
 Artisan::command('drivers:expire-stale', function () {
     $threshold = now()->subMinutes(45);

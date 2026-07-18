@@ -147,8 +147,7 @@ Route::prefix('admin')->group(function () {
         Route::get('/roles-permissions/staff', [\App\Http\Controllers\Admin\RolePermissionController::class, 'getStaffUsers']);
         Route::post('/roles-permissions/users/{user}/assign', [\App\Http\Controllers\Admin\RolePermissionController::class, 'assignRoleToUser']);
 
-        // Driver Wallet & Debt Management
-        Route::get('/drivers/debts', [\App\Http\Controllers\Admin\WalletController::class, 'driversDebts']);
+        // Driver Wallet Management
         Route::post('/wallets/{walletId}/adjust', [\App\Http\Controllers\Admin\WalletController::class, 'adjustBalance']);
         Route::get('/wallets/{walletId}/transactions', [\App\Http\Controllers\Admin\WalletController::class, 'transactions']);
         Route::post('/drivers/{driverId}/block', [\App\Http\Controllers\Admin\WalletController::class, 'blockDriver']);
@@ -223,9 +222,16 @@ Route::middleware(['auth:sanctum', 'role:driver', 'driver.approved'])->prefix('d
     // Portefeuille chauffeur (même contrôleur que passager, basé sur user_id)
     Route::get('/wallet', [WalletController::class, 'show']);
     Route::get('/wallet/transactions/today', [WalletController::class, 'todayTransactions']);
+    Route::get('/wallet/transactions/history', [WalletController::class, 'transactionsHistory']);
     Route::post('/wallet/withdraw', [WithdrawController::class, 'store']);
+    Route::post('/wallet/topup/checkout', [TopupController::class, 'initiate'])->middleware('throttle:10,1');
+    Route::get('/wallet/topup/{reference}/status', [TopupController::class, 'status']);
     Route::get('/next-offer', [TripsController::class, 'driverNextOffer']);
     Route::post('/trips/{id}/accept', [TripsController::class, 'accept']);
+    /** Négociation verbale : le chauffeur propose le prix convenu au passager. */
+    Route::post('/trips/{id}/propose-fare', [TripsController::class, 'proposeFare']);
+    /** Le chauffeur part chercher le client → notifie le passager (suivi carte). */
+    Route::post('/trips/{id}/enroute', [TripsController::class, 'enroute']);
     Route::post('/trips/{id}/decline', [TripsController::class, 'decline']);
     Route::post('/trips/{id}/arrived', [TripsController::class, 'arrived']);
     Route::post('/trips/{id}/start', [TripsController::class, 'start']);
@@ -256,17 +262,20 @@ Route::middleware(['auth:sanctum', 'role:passenger'])->prefix('passenger')->grou
     Route::put('/addresses/{id}', [PassengerAddressController::class, 'update']);
     Route::delete('/addresses/{id}', [PassengerAddressController::class, 'destroy']);
     Route::post('/rides/{id}/cancel', [TripsController::class, 'cancelByPassenger']);
+    /** Négociation verbale : le passager confirme / refuse le chauffeur qui a pris sa course. */
+    Route::post('/rides/{id}/confirm-negotiation', [TripsController::class, 'confirmNegotiation']);
+    Route::post('/rides/{id}/reject-negotiation', [TripsController::class, 'rejectNegotiation']);
     Route::post('/rides/{id}/sos', [TripsController::class, 'sos']);
     Route::get('/wallet', [WalletController::class, 'show']);
     Route::get('/wallet/transactions/history', [WalletController::class, 'transactionsHistory']);
     Route::get('/wallet/transactions', [WalletController::class, 'todayTransactions']);
     Route::post('/wallet/topup', [WalletController::class, 'topup'])->middleware('throttle:20,1');
-    Route::post('/wallet/topup/geniuspay', [TopupController::class, 'initiate'])->middleware('throttle:10,1');
-    /** Alias neutre pour les clients (même handler que geniuspay). */
+    /** Rechargement wallet via PawaPay (Mobile Money). Alias /checkout conservé pour les clients. */
+    Route::post('/wallet/topup/pawapay', [TopupController::class, 'initiate'])->middleware('throttle:10,1');
     Route::post('/wallet/topup/checkout', [TopupController::class, 'initiate'])->middleware('throttle:10,1');
     Route::get('/wallet/topup/{reference}/status', [TopupController::class, 'status']);
     Route::post('/rides/{id}/pay', [WalletController::class, 'payRide']);
-    /** Paiement course (Mobile Money / carte / QR) via agrégateur GeniusPay — renvoie l’URL de checkout. */
+    /** Paiement course (Mobile Money) via PawaPay — invite de paiement poussée sur le téléphone. */
     Route::post('/rides/{id}/checkout', [TopupController::class, 'initiateRideCheckout'])->middleware('throttle:10,1');
     Route::get('/rides/{id}/driver-location', [TripsController::class, 'passengerRideDriverLocation']);
     Route::post('/ratings', [RatingsController::class, 'store']);
@@ -303,26 +312,10 @@ Route::middleware(['auth:sanctum'])->prefix('analytics')->group(function () {
     Route::post('/log', [MobileLogController::class, 'store']);
 });
 
-// GeniusPay webhook & redirects (public, no auth)
+// PawaPay callback (public, no auth). Configurer cette URL dans le tableau de bord PawaPay.
+Route::post('/pawapay/deposits/callback', [TopupController::class, 'webhook']);
+/** Compat : ancienne URL de callback. */
 Route::post('/topup/webhook', [TopupController::class, 'webhook']);
-Route::get('/topup/success', [TopupController::class, 'success']);
-Route::get('/topup/error', [TopupController::class, 'error']);
-
-/** Retours navigateur après checkout GeniusPay (course) — JSON pour WebView / in-app browser. */
-Route::get('/ride-payment/success', function () {
-    return response()->json([
-        'ok' => true,
-        'message' => 'Si le paiement a réussi, vous pouvez fermer cette page et retourner dans l’application.',
-        'ride_id' => request()->query('ride_id'),
-    ]);
-});
-Route::get('/ride-payment/cancel', function () {
-    return response()->json([
-        'ok' => false,
-        'message' => 'Paiement annulé ou interrompu.',
-        'ride_id' => request()->query('ride_id'),
-    ]);
-});
 
 // Public geocoding proxy (throttled)
 Route::prefix('geocoding')->middleware('throttle:300,1')->group(function () {
@@ -339,4 +332,3 @@ Route::prefix('voice')->middleware('throttle:60,1')->group(function () {
 Route::prefix('routing')->middleware('throttle:300,1')->group(function () {
     Route::post('/estimate', [TripsController::class, 'estimateFromCoords']);
 });
-

@@ -187,7 +187,7 @@ class RidesController extends Controller
 
         \Log::info('Admin::cancel success', ['ride_id' => $id]);
 
-        broadcast(new RideCancelled($ride, 'admin', auth()->user()));
+        rescue(fn () => broadcast(new RideCancelled($ride, 'admin', auth()->user())));
 
         return response()->json(['ok' => true, 'message' => 'Course annulée avec succès.']);
     }
@@ -406,10 +406,10 @@ class RidesController extends Controller
             Log::warning('approach_distance_m non enregistrée (assign, non bloquant): ' . $e->getMessage());
         }
 
-        broadcast(new RideAccepted($ride->load('driver')));
+        rescue(fn () => broadcast(new RideAccepted($ride->load('driver'))));
 
         // Temps réel chauffeurs : l'ancien libère son écran, le nouveau charge la course sans redémarrer
-        broadcast(new RideReassigned($ride, (int) $driver->id, $oldDriverId));
+        rescue(fn () => broadcast(new RideReassigned($ride, (int) $driver->id, $oldDriverId)));
 
         try {
             $fcm = app(FcmService::class);

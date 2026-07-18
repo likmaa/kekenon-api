@@ -10,62 +10,6 @@ use Illuminate\Support\Facades\Log;
 class WalletController extends Controller
 {
     /**
-     * List all drivers with their wallet balances (including debts).
-     * GET /api/admin/drivers/debts
-     */
-    public function driversDebts(Request $request)
-    {
-        $query = DB::table('users')
-            ->leftJoin('wallets', 'users.id', '=', 'wallets.user_id')
-            ->leftJoin('driver_profiles', 'users.id', '=', 'driver_profiles.user_id')
-            ->where('users.role', 'driver')
-            ->select([
-                'users.id',
-                'users.name',
-                'users.phone',
-                'users.email',
-                'users.is_blocked',
-                'users.created_at',
-                'wallets.id as wallet_id',
-                'wallets.balance',
-                'wallets.currency',
-                'driver_profiles.license_plate',
-                'driver_profiles.vehicle_make',
-                'driver_profiles.vehicle_model',
-            ])
-            ->orderBy('wallets.balance', 'asc'); // Debts first (negative values)
-
-        // Optional filters
-        if ($request->has('only_debts') && $request->boolean('only_debts')) {
-            $query->where('wallets.balance', '<', 0);
-        }
-
-        if ($request->has('search')) {
-            $search = $request->input('search');
-            $query->where(function ($q) use ($search) {
-                $q->where('users.name', 'like', "%{$search}%")
-                    ->orWhere('users.phone', 'like', "%{$search}%")
-                    ->orWhere('users.email', 'like', "%{$search}%");
-            });
-        }
-
-        $perPage = $request->input('per_page', 50);
-        $drivers = $query->paginate($perPage);
-
-        // Add computed fields
-        $drivers->getCollection()->transform(function ($driver) {
-            $driver->balance = $driver->balance ?? 0;
-            $driver->currency = $driver->currency ?? 'XOF';
-            $driver->has_debt = $driver->balance < 0;
-            $driver->debt_amount = $driver->balance < 0 ? abs($driver->balance) : 0;
-            $driver->debt_level = \App\Support\DriverDebt::level($driver->balance); // ok|notify|alert|blocked
-            return $driver;
-        });
-
-        return response()->json($drivers);
-    }
-
-    /**
      * Record a payment or adjustment to a driver's wallet.
      * POST /api/admin/wallets/{walletId}/adjust
      */

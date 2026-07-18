@@ -15,10 +15,15 @@ class SubscriptionController extends Controller
         return response()->json(['ok' => false, 'code' => $code, 'message' => $message], $status);
     }
 
+    /** Prix de l'abonnement (10 courses). */
+    private const SUBSCRIPTION_PRICE = 500;
+
     /**
      * POST /driver/subscription/renew
-     * 
+     *
      * Renouvelle l'abonnement du chauffeur : débite 500 F et ajoute 10 courses au compteur.
+     * Le solde principal est débité en premier ; si insuffisant (ex. portefeuille à 0),
+     * le solde bonus couvre le reste.
      */
     public function renew(Request $request): \Illuminate\Http\JsonResponse
     {
@@ -31,41 +36,70 @@ class SubscriptionController extends Controller
 
         try {
             return DB::transaction(function () use ($driver) {
+                $price = self::SUBSCRIPTION_PRICE;
+
                 // Verrouiller le portefeuille pour mise à jour
                 $wallet = DB::table('wallets')
                     ->where('user_id', $driver->id)
                     ->lockForUpdate()
                     ->first();
 
-                if (!$wallet || (int) $wallet->balance < 500) {
-                    $balance = $wallet ? (int) $wallet->balance : 0;
+                $balance = $wallet ? (int) $wallet->balance : 0;
+                $bonus = $wallet ? (int) ($wallet->bonus_balance ?? 0) : 0;
+
+                if ($balance + $bonus < $price) {
+                    $detail = $bonus > 0
+                        ? "Votre solde ({$balance} F) et votre bonus ({$bonus} F) sont insuffisants"
+                        : "Votre solde de portefeuille ({$balance} F) est insuffisant";
                     return $this->apiError(
                         'INSUFFICIENT_BALANCE',
-                        "Votre solde de portefeuille ({$balance} F) est insuffisant pour acheter l'abonnement de 500 F. Veuillez recharger votre portefeuille.",
+                        "{$detail} pour acheter l'abonnement de {$price} F. Veuillez recharger votre portefeuille.",
                         422
                     );
                 }
 
-                // 1. Débiter les 500 F du solde
-                $before = (int) $wallet->balance;
-                $after = $before - 500;
+                // 1. Débiter le solde principal d'abord, le bonus couvre le reste
+                $fromBalance = min($balance, $price);
+                $fromBonus = $price - $fromBalance;
+                $afterBalance = $balance - $fromBalance;
+                $afterBonus = $bonus - $fromBonus;
 
                 DB::table('wallets')->where('id', $wallet->id)->update([
-                    'balance' => $after,
+                    'balance' => $afterBalance,
+                    'bonus_balance' => $afterBonus,
                     'updated_at' => now(),
                 ]);
 
-                // 2. Enregistrer la transaction
-                DB::table('wallet_transactions')->insert([
-                    'wallet_id' => $wallet->id,
-                    'type' => 'debit',
-                    'source' => 'subscription_fee',
-                    'amount' => 500,
-                    'balance_before' => $before,
-                    'balance_after' => $after,
-                    'meta' => json_encode(['desc' => 'Abonnement 10 courses Kêkênon']),
-                    'created_at' => now(),
-                ]);
+                // 2. Enregistrer la ou les transactions (part solde / part bonus)
+                if ($fromBalance > 0) {
+                    DB::table('wallet_transactions')->insert([
+                        'wallet_id' => $wallet->id,
+                        'type' => 'debit',
+                        'source' => 'subscription_fee',
+                        'amount' => $fromBalance,
+                        'balance_before' => $balance,
+                        'balance_after' => $afterBalance,
+                        'meta' => json_encode(['desc' => 'Abonnement 10 courses Kêkênon', 'bonus_used' => $fromBonus]),
+                        'created_at' => now(),
+                    ]);
+                }
+                if ($fromBonus > 0) {
+                    DB::table('wallet_transactions')->insert([
+                        'wallet_id' => $wallet->id,
+                        'type' => 'debit',
+                        'source' => 'subscription_fee_bonus',
+                        'amount' => $fromBonus,
+                        // Le solde principal ne bouge pas sur la part bonus
+                        'balance_before' => $afterBalance,
+                        'balance_after' => $afterBalance,
+                        'meta' => json_encode([
+                            'desc' => 'Abonnement payé avec le bonus Kêkênon',
+                            'bonus_before' => $bonus,
+                            'bonus_after' => $afterBonus,
+                        ]),
+                        'created_at' => now(),
+                    ]);
+                }
 
                 // 3. Créditer les 10 courses au compteur
                 $profile = DB::table('driver_profiles')
@@ -88,16 +122,22 @@ class SubscriptionController extends Controller
 
                 Log::info('Driver subscription renewed successfully', [
                     'driver_id' => $driver->id,
-                    'previous_balance' => $before,
-                    'new_balance' => $after,
+                    'previous_balance' => $balance,
+                    'new_balance' => $afterBalance,
+                    'bonus_used' => $fromBonus,
+                    'new_bonus_balance' => $afterBonus,
                     'remaining_rides' => $newRidesCount,
                 ]);
 
                 return response()->json([
                     'ok' => true,
-                    'message' => 'Votre abonnement a été activé avec succès pour 10 courses supplémentaires.',
+                    'message' => $fromBonus > 0
+                        ? "Abonnement activé (dont {$fromBonus} F payés avec votre bonus) : 10 courses supplémentaires."
+                        : 'Votre abonnement a été activé avec succès pour 10 courses supplémentaires.',
                     'subscription_remaining_rides' => $newRidesCount,
-                    'wallet_balance' => $after,
+                    'wallet_balance' => $afterBalance,
+                    'bonus_balance' => $afterBonus,
+                    'bonus_used' => $fromBonus,
                 ]);
             });
         } catch (\Exception $e) {

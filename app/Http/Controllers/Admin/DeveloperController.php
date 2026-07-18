@@ -495,7 +495,7 @@ class DeveloperController extends Controller
 
             $fresh = Ride::find($rideId);
             if ($fresh) {
-                broadcast(new PaymentConfirmed($fresh));
+                rescue(fn () => broadcast(new PaymentConfirmed($fresh)));
             }
 
             return response()->json([

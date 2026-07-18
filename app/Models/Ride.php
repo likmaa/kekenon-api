@@ -65,6 +65,7 @@ class Ride extends Model
         'pricing_mode',
         'negotiated_fare',
         'bid_accepted_driver_id',
+        'negotiation_confirmed_at',
     ];
 
 
@@ -75,6 +76,7 @@ class Ride extends Model
         'cancelled_at' => 'datetime',
         'stop_started_at' => 'datetime',
         'arrived_at' => 'datetime',
+        'negotiation_confirmed_at' => 'datetime',
         'declined_driver_ids' => 'array',
         'breakdown' => 'array',
         'has_baggage' => 'boolean',

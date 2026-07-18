@@ -76,7 +76,7 @@ class BiddingController extends Controller
 
             // Diffuser l'offre en temps réel à l'autre partie via le canal privé de la course
             try {
-                broadcast(new BidSubmitted($bid))->toOthers();
+                rescue(fn () => broadcast(new BidSubmitted($bid))->toOthers());
             } catch (\Exception $e) {
                 Log::error('[BiddingController] BidSubmitted broadcast failed', ['error' => $e->getMessage()]);
             }
@@ -181,7 +181,7 @@ class BiddingController extends Controller
 
                 // 4. Diffuser l'acceptation en temps réel aux deux apps via le canal de la course
                 try {
-                    broadcast(new BidAccepted($bid))->toOthers();
+                    rescue(fn () => broadcast(new BidAccepted($bid))->toOthers());
                 } catch (\Exception $e) {
                     Log::error('[BiddingController] BidAccepted broadcast failed', ['error' => $e->getMessage()]);
                 }

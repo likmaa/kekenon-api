@@ -67,7 +67,7 @@ class RideService
     public function notifyNearbyDrivers(Ride $ride)
     {
         try {
-            broadcast(new RideRequested($ride));
+            rescue(fn () => broadcast(new RideRequested($ride)));
         } catch (\Exception $e) {
             Log::error('Pusher Broadcast Error: '.$e->getMessage());
         }

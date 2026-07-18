@@ -37,7 +37,6 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withSchedule(function ($schedule) {
         $schedule->command('rides:expire')->everyMinute();
         $schedule->command('drivers:expire-stale')->everyFiveMinutes();
-        $schedule->command('drivers:check-debts')->dailyAt('08:00');
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //

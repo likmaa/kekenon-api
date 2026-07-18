@@ -6,7 +6,6 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
-use App\Support\DriverDebt;
 use Carbon\Carbon;
 
 class ExternalRevenueController extends Controller
@@ -56,30 +55,36 @@ class ExternalRevenueController extends Controller
                 ])
             ]);
 
-            // 2. Déduire la commission du portefeuille (Crée la dette)
-            $balanceBefore = $wallet->balance;
-            $balanceAfter = $balanceBefore - $commissionAmount;
+            // 2. Déduire la commission du portefeuille — modèle zéro dette :
+            //    on ne prélève jamais au-delà du solde disponible (pas de solde négatif).
+            $balanceBefore = (int) $wallet->balance;
+            $deducted = (int) min(round($commissionAmount), max(0, $balanceBefore));
+            $balanceAfter = $balanceBefore - $deducted;
 
-            DB::table('wallets')->where('id', $wallet->id)->decrement('balance', $commissionAmount);
+            if ($deducted > 0) {
+                DB::table('wallets')->where('id', $wallet->id)->decrement('balance', $deducted);
 
-            DB::table('wallet_transactions')->insert([
-                'wallet_id' => $wallet->id,
-                'type' => 'debit',
-                'source' => 'commission',
-                'amount' => $commissionAmount,
-                'balance_before' => $balanceBefore,
-                'balance_after' => $balanceAfter,
-                'created_at' => $createdAt,
-                'meta' => json_encode([
-                    'description' => "Commission sur course hors-app du " . $createdAt->format('d/m/Y'),
-                    'related_to_external' => true,
-                    'external_amount' => $totalAmount
-                ])
-            ]);
+                DB::table('wallet_transactions')->insert([
+                    'wallet_id' => $wallet->id,
+                    'type' => 'debit',
+                    'source' => 'commission',
+                    'amount' => $deducted,
+                    'balance_before' => $balanceBefore,
+                    'balance_after' => $balanceAfter,
+                    'created_at' => $createdAt,
+                    'meta' => json_encode([
+                        'description' => "Commission sur course hors-app du " . $createdAt->format('d/m/Y'),
+                        'related_to_external' => true,
+                        'external_amount' => $totalAmount,
+                        'commission_due' => round($commissionAmount),
+                    ])
+                ]);
+            }
 
             return response()->json([
                 'message' => 'Recette enregistrée avec succès.',
-                'commission_deducted' => $commissionAmount,
+                'commission_due' => round($commissionAmount),
+                'commission_deducted' => $deducted,
                 'new_balance' => $balanceAfter
             ]);
         });

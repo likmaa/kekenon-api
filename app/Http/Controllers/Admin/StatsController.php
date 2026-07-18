@@ -8,7 +8,6 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use App\Models\Ride;
 use App\Models\User;
-use App\Support\DriverDebt;
 
 class StatsController extends Controller
 {
@@ -87,13 +86,6 @@ class StatsController extends Controller
             ? round(($acceptedToday / $requestedToday) * 100, 1)
             : null;
 
-        // --- KPI 7 : Dette totale chauffeurs (somme des soldes négatifs) ---
-        $totalDriverDebt = (int) abs((float) DB::table('wallets')
-            ->join('users', 'users.id', '=', 'wallets.user_id')
-            ->where('users.role', 'driver')
-            ->where('wallets.balance', '<', 0)
-            ->sum('wallets.balance'));
-
         // --- KPI 8 : Temps moyen d'attribution (created_at -> accepted_at, courses du jour) ---
         $avgAssignmentSec = (float) Ride::query()
             ->whereNotNull('accepted_at')
@@ -134,11 +126,6 @@ class StatsController extends Controller
             'acceptance_rate_basis' => [
                 'accepted' => $acceptedToday,
                 'requested' => $requestedToday,
-            ],
-            // KPI 7
-            'total_driver_debt' => [
-                'amount' => $totalDriverDebt,
-                'currency' => 'XOF',
             ],
             // KPI 8
             'avg_assignment_seconds' => $avgAssignmentSec,
@@ -261,22 +248,6 @@ class StatsController extends Controller
                 'code' => 'pending_unassigned',
                 'title' => 'Courses sans chauffeur',
                 'detail' => "{$pendingRides} course(s) en attente d'attribution depuis plus de 5 min.",
-            ];
-        }
-
-        // ÉLEVÉE : chauffeurs en dette de blocage (dépend du seuil blockThreshold)
-        $blockThreshold = DriverDebt::blockThreshold();
-        $blockDebtCount = (int) DB::table('wallets')
-            ->join('users', 'users.id', '=', 'wallets.user_id')
-            ->where('users.role', 'driver')
-            ->where('wallets.balance', '<=', -$blockThreshold)
-            ->count();
-        if ($blockDebtCount > 0) {
-            $alerts[] = [
-                'severity' => 'elevee',
-                'code' => 'driver_debt_block',
-                'title' => 'Dette chauffeur importante',
-                'detail' => "{$blockDebtCount} chauffeur(s) avec une dette supérieure à " . number_format($blockThreshold, 0, ',', ' ') . " F.",
             ];
         }
 
@@ -697,8 +668,6 @@ class StatsController extends Controller
             ->selectRaw('driver_id, AVG(stars) as avg_stars, COUNT(*) as cnt')
             ->groupBy('driver_id')->get()->keyBy('driver_id');
 
-        $wallets = DB::table('wallets')->whereNotNull('user_id')->pluck('balance', 'user_id');
-
         $driverIds = collect()->merge($completed->keys())->merge($accepted->keys())->unique()->values();
         if ($driverIds->isEmpty()) {
             return response()->json(['period_days' => $days, 'weights' => ['activite' => 40, 'satisfaction' => 30, 'ponctualite' => 20, 'discipline' => 10], 'drivers' => []]);
@@ -717,7 +686,6 @@ class StatsController extends Controller
             $avgPickup = isset($pickup[$id]) ? (float) $pickup[$id]->avg_pickup : null;
             $ratingCnt = (int) ($ratings[$id]->cnt ?? 0);
             $ratingAvg = $ratingCnt > 0 ? (float) $ratings[$id]->avg_stars : null;
-            $balance = (float) ($wallets[$id] ?? 0);
 
             // Activité (40 pts)
             $activityScore = min($completedCount / $activityTarget, 1.0) * 40;
@@ -757,8 +725,6 @@ class StatsController extends Controller
                     'avg_pickup_seconds' => $avgPickup !== null ? (int) round($avgPickup) : null,
                     'rating' => $ratingAvg !== null ? round($ratingAvg, 2) : null,
                     'rating_count' => $ratingCnt,
-                    'debt_amount' => DriverDebt::amount($balance),
-                    'debt_level' => DriverDebt::level($balance),
                 ],
             ];
         }

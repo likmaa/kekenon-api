@@ -136,7 +136,7 @@ class RatingsController extends Controller
             }
 
             // Broadcast that the ride was rated (includes tip)
-            broadcast(new RideRated($ride, (int) $data['stars']));
+            rescue(fn () => broadcast(new RideRated($ride, (int) $data['stars'])));
         });
 
         return response()->json([

@@ -7,9 +7,14 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use App\Events\PaymentConfirmed;
+use App\Services\PassengerBonusService;
 
 class WalletController extends Controller
 {
+    public function __construct(private readonly PassengerBonusService $passengerBonusService)
+    {
+    }
+
     private function apiError(string $code, string $message, int $status, array $errors = []): \Illuminate\Http\JsonResponse
     {
         return response()->json([
@@ -51,6 +56,8 @@ class WalletController extends Controller
 
         return response()->json([
             'balance' => (int) $wallet['balance'],
+            'bonus_balance' => (int) ($wallet['bonus_balance'] ?? 0),
+            'ride_bonus_balance' => $this->passengerBonusService->availableAmount($user),
             'currency' => $wallet['currency'],
         ]);
     }
@@ -140,9 +147,14 @@ class WalletController extends Controller
             'ride_earnings' => 'Gain course',
             'topup_cash' => 'Rechargement (espèces)',
             'topup_qr' => 'Rechargement (QR)',
-            'topup_geniuspay' => 'Rechargement',
+            'topup_pawapay' => 'Rechargement (Mobile Money)',
+            'topup_geniuspay' => 'Rechargement', // héritage : anciennes transactions
             'ride_tip' => 'Pourboire',
             'commission_deduction' => 'Commission',
+            'subscription_fee' => 'Abonnement (10 courses)',
+            'subscription_fee_bonus' => 'Abonnement (payé en bonus)',
+            'bonus_grant' => 'Bonus offert',
+            'app_fee' => 'Frais de plateforme',
             'withdrawal' => 'Retrait',
             'admin_reset' => 'Ajustement solde',
             'admin_adjustment' => 'Ajustement',
@@ -154,6 +166,12 @@ class WalletController extends Controller
     {
         if (str_starts_with($source, 'topup')) {
             return 'topup';
+        }
+        if ($source === 'withdrawal') {
+            return 'withdrawal';
+        }
+        if (str_contains($source, 'bonus') || str_starts_with($source, 'subscription')) {
+            return 'bonus';
         }
         if (str_contains($source, 'delivery')) {
             return 'delivery';
@@ -397,7 +415,7 @@ class WalletController extends Controller
         });
 
         if ($ride) {
-            broadcast(new PaymentConfirmed($ride));
+            rescue(fn () => broadcast(new PaymentConfirmed($ride)));
         }
 
         return response()->json($result);

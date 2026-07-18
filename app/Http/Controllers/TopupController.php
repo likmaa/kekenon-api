@@ -4,23 +4,24 @@ namespace App\Http\Controllers;
 
 use App\Events\PaymentConfirmed;
 use App\Models\Ride;
-use App\Services\GeniusPayService;
+use App\Services\PawaPayService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 class TopupController extends Controller
 {
-    protected GeniusPayService $geniusPay;
+    /** Opérateurs Mobile Money supportés (Bénin). */
+    private const PROVIDERS = ['MTN_MOMO_BEN', 'MOOV_BEN'];
 
-    public function __construct(GeniusPayService $geniusPay)
+    public function __construct(protected PawaPayService $pawaPay)
     {
-        $this->geniusPay = $geniusPay;
     }
 
     /**
-     * Initiate a wallet top-up via GeniusPay.
-     * Returns a checkout URL the mobile app should open in a browser/webview.
+     * Initie un rechargement de portefeuille via PawaPay (Mobile Money).
+     * Le client reçoit une invite de paiement sur son téléphone ; le crédit
+     * est appliqué à réception du callback (ou via /status qui relit le dépôt).
      */
     public function initiate(Request $request)
     {
@@ -28,8 +29,8 @@ class TopupController extends Controller
 
         $data = $request->validate([
             'amount' => ['required', 'integer', 'min:200'],
-            'payment_method' => ['nullable', 'string'],
-            'phone' => ['nullable', 'string', 'max:20'],
+            'phone' => ['required', 'string', 'max:20'],
+            'provider' => ['required', 'string', 'in:' . implode(',', self::PROVIDERS)],
             'idempotency_key' => ['nullable', 'string', 'max:120'],
         ]);
 
@@ -48,54 +49,42 @@ class TopupController extends Controller
                 ->first();
 
             if ($existing) {
-                $meta = json_decode((string) ($existing->meta ?? '{}'), true);
                 return response()->json([
                     'ok' => true,
                     'reference' => $existing->reference,
-                    'payment_url' => $meta['payment_url'] ?? null,
-                    'payment_id' => $existing->geniuspay_id,
+                    'deposit_id' => $existing->provider_ref,
+                    'status' => $existing->status,
                     'reused' => true,
                 ]);
             }
         }
 
+        $depositId = $this->pawaPay->newDepositId();
+
         try {
-            $params = [
+            $result = $this->pawaPay->createDeposit([
+                'depositId' => $depositId,
                 'amount' => $amount,
                 'currency' => 'XOF',
-                'description' => "Rechargement wallet Kêkênon - {$amount} XOF",
-                'customer' => [
-                    'name' => $user->name,
-                    'phone' => $data['phone'] ?? $user->phone,
-                    'email' => $user->email,
-                    'country' => 'BJ',
-                ],
+                'phoneNumber' => $data['phone'],
+                'provider' => $data['provider'],
+                'customerMessage' => 'Kekenon',
+                'clientReferenceId' => $reference,
                 'metadata' => [
-                    'user_id' => $user->id,
-                    'reference' => $reference,
-                    'type' => 'wallet_topup',
+                    ['fieldName' => 'type', 'fieldValue' => 'wallet_topup'],
+                    ['fieldName' => 'reference', 'fieldValue' => $reference],
+                    ['fieldName' => 'user_id', 'fieldValue' => (string) $user->id],
                 ],
-                'success_url' => config('app.url') . '/api/topup/success?ref=' . $reference,
-                'error_url' => config('app.url') . '/api/topup/error?ref=' . $reference,
-            ];
-
-            if (!empty($data['payment_method'])) {
-                $params['payment_method'] = $data['payment_method'];
-            }
-
-            $result = $this->geniusPay->createPayment($params);
+            ]);
 
             DB::table('topup_requests')->insert([
                 'user_id' => $user->id,
                 'reference' => $reference,
-                'geniuspay_id' => $result['id'] ?? $result['payment_id'] ?? null,
+                'provider_ref' => $depositId,
                 'amount' => $amount,
                 'currency' => 'XOF',
                 'status' => 'pending',
-                'meta' => json_encode(array_merge($result, [
-                    'idempotency_key' => $idemKey,
-                    'payment_url' => $result['payment_url'] ?? $result['checkout_url'] ?? null,
-                ])),
+                'meta' => json_encode(array_merge($result, ['idempotency_key' => $idemKey])),
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
@@ -103,38 +92,39 @@ class TopupController extends Controller
             return response()->json([
                 'ok' => true,
                 'reference' => $reference,
-                'payment_url' => $result['payment_url'] ?? $result['checkout_url'] ?? null,
-                'payment_id' => $result['id'] ?? $result['payment_id'] ?? null,
+                'deposit_id' => $depositId,
+                'status' => 'pending',
             ]);
         } catch (\Throwable $e) {
-            Log::error('GeniusPay topup initiation failed', [
+            Log::error('PawaPay topup initiation failed', [
                 'user_id' => $user->id,
                 'amount' => $amount,
                 'error' => $e->getMessage(),
             ]);
 
-            return $this->apiError('PAYMENT_INIT_FAILED', 'Erreur lors de l\'initiation du paiement.', 500);
+            return $this->apiError('PAYMENT_INIT_FAILED', $e->getMessage() ?: 'Erreur lors de l\'initiation du paiement.', 502);
         }
     }
 
     /**
-     * Initie le paiement d’une course terminée via GeniusPay (Mobile Money, carte, etc.).
+     * Initie le paiement d'une course terminée (Mobile Money) via PawaPay.
      */
     public function initiateRideCheckout(Request $request, int $id)
     {
         $user = $request->user();
         $data = $request->validate([
+            'phone' => ['required', 'string', 'max:20'],
+            'provider' => ['required', 'string', 'in:' . implode(',', self::PROVIDERS)],
             'idempotency_key' => ['nullable', 'string', 'max:120'],
         ]);
 
         $ride = Ride::query()->where('id', $id)->where('rider_id', $user->id)->firstOrFail();
 
         if ($ride->status !== 'completed') {
-            return response()->json(['message' => 'La course n’est pas terminée.'], 422);
+            return response()->json(['message' => 'La course n\'est pas terminée.'], 422);
         }
 
-        $pm = (string) ($ride->payment_method ?? '');
-        if (!in_array($pm, ['mobile_money', 'card', 'qr'], true)) {
+        if ((string) ($ride->payment_method ?? '') !== 'mobile_money') {
             return response()->json(['message' => 'Ce mode de paiement utilise un autre flux.'], 422);
         }
 
@@ -150,146 +140,89 @@ class TopupController extends Controller
             return response()->json(['message' => 'Paiement déjà enregistré.'], 409);
         }
 
-        if (!empty($ride->payment_link) && $ride->payment_status === 'pending') {
-            return response()->json([
-                'ok' => true,
-                'payment_url' => $ride->payment_link,
-                'reused' => true,
-            ]);
-        }
-
         $idemKey = isset($data['idempotency_key']) ? trim((string) $data['idempotency_key']) : null;
         $reference = $idemKey
             ? ('ride_pay_' . $ride->id . '_' . substr(sha1($idemKey), 0, 20))
             : ('ride_pay_' . $ride->id . '_' . now()->timestamp);
         $amount = (int) $ride->fare_amount;
+        $depositId = $this->pawaPay->newDepositId();
 
         try {
-            $params = [
+            $this->pawaPay->createDeposit([
+                'depositId' => $depositId,
                 'amount' => $amount,
                 'currency' => $ride->currency ?? 'XOF',
-                'description' => 'Paiement course Kêkênon #' . $ride->id,
-                'customer' => [
-                    'name' => $user->name,
-                    'phone' => $user->phone,
-                    'email' => $user->email,
-                    'country' => 'BJ',
-                ],
+                'phoneNumber' => $data['phone'],
+                'provider' => $data['provider'],
+                'customerMessage' => 'Course ' . $ride->id,
+                'clientReferenceId' => $reference,
                 'metadata' => [
-                    'type' => 'ride_payment',
-                    'ride_id' => $ride->id,
-                    'reference' => $reference,
-                    'user_id' => $user->id,
+                    ['fieldName' => 'type', 'fieldValue' => 'ride_payment'],
+                    ['fieldName' => 'ride_id', 'fieldValue' => (string) $ride->id],
+                    ['fieldName' => 'reference', 'fieldValue' => $reference],
+                    ['fieldName' => 'user_id', 'fieldValue' => (string) $user->id],
                 ],
-                'success_url' => rtrim((string) config('app.url'), '/') . '/api/ride-payment/success?ride_id=' . $ride->id,
-                'error_url' => rtrim((string) config('app.url'), '/') . '/api/ride-payment/cancel?ride_id=' . $ride->id,
-            ];
+            ]);
 
-            if ($pm === 'card') {
-                $params['payment_method'] = 'card';
-            }
-
-            $result = $this->geniusPay->createPayment($params);
-
-            $payUrl = $result['payment_url'] ?? $result['checkout_url'] ?? null;
-            if (!$payUrl || !is_string($payUrl)) {
-                throw new \RuntimeException('GeniusPay : aucune URL de paiement dans la réponse.');
-            }
-
-            $ride->payment_link = $payUrl;
-            $ride->external_reference = (string) ($result['reference'] ?? $result['id'] ?? $reference);
+            $ride->external_reference = $depositId;
+            $ride->payment_status = 'pending';
             $ride->save();
 
             return response()->json([
                 'ok' => true,
                 'reference' => $reference,
-                'payment_url' => $payUrl,
-                'payment_id' => $result['id'] ?? $result['payment_id'] ?? null,
+                'deposit_id' => $depositId,
+                'status' => 'pending',
             ]);
         } catch (\Throwable $e) {
-            Log::error('GeniusPay ride checkout failed', [
+            Log::error('PawaPay ride checkout failed', [
                 'ride_id' => $ride->id,
                 'error' => $e->getMessage(),
             ]);
 
-            return $this->apiError('RIDE_CHECKOUT_INIT_FAILED', 'Erreur lors de l’ouverture du paiement.', 500);
+            return $this->apiError('RIDE_CHECKOUT_INIT_FAILED', $e->getMessage() ?: 'Erreur lors de l\'initiation du paiement.', 502);
         }
     }
 
     /**
-     * Webhook called by GeniusPay when payment status changes.
+     * Callback PawaPay : notifié quand un dépôt atteint un statut final.
+     * On relit le dépôt côté PawaPay (source de vérité) avant tout crédit.
      */
     public function webhook(Request $request)
     {
-        $payload = $request->getContent();
-        $signature = $request->header('X-GeniusPay-Signature', '');
+        $payload = $request->all();
+        $depositId = $payload['depositId'] ?? ($payload['data']['depositId'] ?? null);
 
-        if (!$this->geniusPay->verifyWebhookSignature($payload, $signature)) {
-            Log::warning('GeniusPay webhook signature mismatch');
-            return response()->json(['error' => 'Invalid signature'], 401);
+        if (! $depositId || ! is_string($depositId)) {
+            Log::warning('PawaPay callback without depositId', ['payload' => $payload]);
+
+            return response()->json(['ok' => true]);
         }
 
-        $data = $request->all();
-        $status = $data['status'] ?? null;
-        $paymentId = $data['id'] ?? $data['payment_id'] ?? null;
-        $metadata = $data['metadata'] ?? [];
-        if (is_string($metadata)) {
-            $decoded = json_decode($metadata, true);
-            $metadata = is_array($decoded) ? $decoded : [];
-        }
+        // Relecture serveur du statut réel (ne jamais faire confiance au corps seul).
+        $deposit = $this->pawaPay->getDeposit($depositId);
+        $status = $deposit['status'] ?? ($payload['status'] ?? null);
 
-        Log::info('GeniusPay webhook received', [
-            'payment_id' => $paymentId,
-            'status' => $status,
-            'metadata_type' => $metadata['type'] ?? null,
-        ]);
+        Log::info('PawaPay callback received', ['deposit_id' => $depositId, 'status' => $status]);
 
-        if ($status === 'completed' || $status === 'success' || $status === 'successful') {
-            if (($metadata['type'] ?? '') === 'ride_payment') {
-                $this->completeRideFromGeniusPay($paymentId !== null ? (string) $paymentId : null, $metadata);
+        if ($status === 'COMPLETED') {
+            $ride = Ride::query()->where('external_reference', $depositId)->first();
+            if ($ride) {
+                $this->completeRideFromDeposit($ride->id, $depositId);
             } else {
-                $this->creditWallet($paymentId, $metadata, $data);
+                $this->creditWallet($depositId);
             }
-        } else {
+        } elseif ($status === 'FAILED' || $status === 'REJECTED') {
             DB::table('topup_requests')
-                ->where('geniuspay_id', $paymentId)
-                ->update([
-                    'status' => $status ?? 'failed',
-                    'updated_at' => now(),
-                ]);
+                ->where('provider_ref', $depositId)
+                ->update(['status' => 'failed', 'updated_at' => now()]);
         }
 
         return response()->json(['ok' => true]);
     }
 
     /**
-     * Success redirect (mobile deep link can be triggered here).
-     */
-    public function success(Request $request)
-    {
-        $ref = $request->query('ref');
-        return response()->json([
-            'ok' => true,
-            'message' => 'Rechargement effectué avec succès.',
-            'reference' => $ref,
-        ]);
-    }
-
-    /**
-     * Error redirect.
-     */
-    public function error(Request $request)
-    {
-        $ref = $request->query('ref');
-        return response()->json([
-            'ok' => false,
-            'message' => 'Le rechargement a échoué.',
-            'reference' => $ref,
-        ]);
-    }
-
-    /**
-     * Check the status of a topup request.
+     * Statut d'un rechargement. Relit PawaPay si encore en attente (secours callback).
      */
     public function status(Request $request, string $reference)
     {
@@ -300,8 +233,21 @@ class TopupController extends Controller
             ->where('user_id', $user->id)
             ->first();
 
-        if (!$topup) {
+        if (! $topup) {
             return $this->apiError('TOPUP_NOT_FOUND', 'Not found', 404);
+        }
+
+        if ($topup->status === 'pending' && $topup->provider_ref) {
+            $deposit = $this->pawaPay->getDeposit((string) $topup->provider_ref);
+            $remote = $deposit['status'] ?? null;
+            if ($remote === 'COMPLETED') {
+                $this->creditWallet((string) $topup->provider_ref);
+                $topup = DB::table('topup_requests')->where('id', $topup->id)->first();
+            } elseif ($remote === 'FAILED' || $remote === 'REJECTED') {
+                DB::table('topup_requests')->where('id', $topup->id)
+                    ->update(['status' => 'failed', 'updated_at' => now()]);
+                $topup->status = 'failed';
+            }
         }
 
         return response()->json([
@@ -323,22 +269,13 @@ class TopupController extends Controller
     }
 
     /**
-     * Finalise une course payée via GeniusPay (webhook).
+     * Finalise une course payée via PawaPay.
      */
-    protected function completeRideFromGeniusPay(?string $paymentId, array $metadata): void
+    protected function completeRideFromDeposit(int $rideId, string $depositId): void
     {
-        $rideId = isset($metadata['ride_id']) ? (int) $metadata['ride_id'] : 0;
-        if ($rideId <= 0) {
-            Log::warning('GeniusPay ride webhook: missing ride_id', ['metadata' => $metadata]);
-
-            return;
-        }
-
-        DB::transaction(function () use ($rideId, $paymentId, $metadata) {
+        DB::transaction(function () use ($rideId, $depositId) {
             $ride = Ride::query()->where('id', $rideId)->lockForUpdate()->first();
-            if (!$ride) {
-                Log::warning('GeniusPay ride webhook: ride not found', ['ride_id' => $rideId]);
-
+            if (! $ride) {
                 return;
             }
 
@@ -346,16 +283,12 @@ class TopupController extends Controller
                 ->where('ride_id', $ride->id)
                 ->where('status', 'succeeded')
                 ->first();
-            if ($existing) {
-                return;
-            }
-
-            if ($ride->payment_status === 'completed') {
+            if ($existing || $ride->payment_status === 'completed') {
                 return;
             }
 
             $pm = (string) ($ride->payment_method ?? 'mobile_money');
-            if (!in_array($pm, ['mobile_money', 'card', 'qr', 'wallet'], true)) {
+            if (! in_array($pm, ['mobile_money', 'wallet'], true)) {
                 $pm = 'mobile_money';
             }
 
@@ -366,10 +299,7 @@ class TopupController extends Controller
                 'currency' => $ride->currency ?? 'XOF',
                 'method' => $pm,
                 'status' => 'succeeded',
-                'meta' => json_encode([
-                    'geniuspay_id' => $paymentId,
-                    'reference' => $metadata['reference'] ?? null,
-                ]),
+                'meta' => json_encode(['pawapay_deposit_id' => $depositId]),
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
@@ -382,7 +312,7 @@ class TopupController extends Controller
                     ->where('user_id', $ride->driver_id)
                     ->lockForUpdate()
                     ->first();
-                if (!$driverWallet) {
+                if (! $driverWallet) {
                     $dWid = DB::table('wallets')->insertGetId([
                         'user_id' => $ride->driver_id,
                         'balance' => 0,
@@ -404,7 +334,7 @@ class TopupController extends Controller
                     'amount' => $earnings,
                     'balance_before' => $dBefore,
                     'balance_after' => $dAfter,
-                    'meta' => json_encode(['ride_id' => $ride->id, 'via' => 'geniuspay']),
+                    'meta' => json_encode(['ride_id' => $ride->id, 'via' => 'pawapay']),
                     'created_at' => now(),
                 ]);
 
@@ -417,41 +347,24 @@ class TopupController extends Controller
 
         $fresh = Ride::find($rideId);
         if ($fresh && $fresh->payment_status === 'completed') {
-            broadcast(new PaymentConfirmed($fresh));
+            rescue(fn () => broadcast(new PaymentConfirmed($fresh)));
         }
     }
 
-    protected function creditWallet(?string $paymentId, array $metadata, array $rawData): void
+    /**
+     * Crédite le portefeuille après un rechargement PawaPay confirmé.
+     */
+    protected function creditWallet(string $depositId): void
     {
-        $reference = $metadata['reference'] ?? null;
+        DB::transaction(function () use ($depositId) {
+            $topup = DB::table('topup_requests')
+                ->where('provider_ref', $depositId)
+                ->where('status', 'pending')
+                ->lockForUpdate()
+                ->first();
 
-        if (!$paymentId && !$reference) {
-            Log::warning('GeniusPay webhook: missing payment id and reference');
-
-            return;
-        }
-
-        DB::transaction(function () use ($paymentId, $reference) {
-            $q = DB::table('topup_requests')->where('status', 'pending');
-            if ($paymentId && $reference) {
-                $q->where(function ($sub) use ($paymentId, $reference) {
-                    $sub->where('geniuspay_id', $paymentId)->orWhere('reference', $reference);
-                });
-            } elseif ($paymentId) {
-                $q->where('geniuspay_id', $paymentId);
-            } else {
-                $q->where('reference', $reference);
-            }
-
-            $topup = $q->lockForUpdate()->first();
-
-            if (!$topup) {
-                Log::warning('GeniusPay webhook: no pending topup found', [
-                    'payment_id' => $paymentId,
-                    'reference' => $reference,
-                ]);
-
-                return;
+            if (! $topup) {
+                return; // Déjà traité ou introuvable.
             }
 
             $wallet = DB::table('wallets')
@@ -459,7 +372,7 @@ class TopupController extends Controller
                 ->lockForUpdate()
                 ->first();
 
-            if (!$wallet) {
+            if (! $wallet) {
                 $walletId = DB::table('wallets')->insertGetId([
                     'user_id' => $topup->user_id,
                     'balance' => 0,
@@ -476,13 +389,13 @@ class TopupController extends Controller
             DB::table('wallet_transactions')->insert([
                 'wallet_id' => $wallet->id,
                 'type' => 'credit',
-                'source' => 'topup_geniuspay',
+                'source' => 'topup_pawapay',
                 'amount' => (int) $topup->amount,
                 'balance_before' => $before,
                 'balance_after' => $after,
                 'meta' => json_encode([
                     'reference' => $topup->reference,
-                    'geniuspay_id' => $topup->geniuspay_id,
+                    'pawapay_deposit_id' => $depositId,
                 ]),
                 'created_at' => now(),
             ]);
@@ -494,12 +407,9 @@ class TopupController extends Controller
 
             DB::table('topup_requests')
                 ->where('id', $topup->id)
-                ->update([
-                    'status' => 'completed',
-                    'updated_at' => now(),
-                ]);
+                ->update(['status' => 'completed', 'updated_at' => now()]);
 
-            Log::info('GeniusPay topup credited', [
+            Log::info('PawaPay topup credited', [
                 'user_id' => $topup->user_id,
                 'amount' => $topup->amount,
                 'reference' => $topup->reference,

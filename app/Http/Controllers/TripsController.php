@@ -10,6 +10,10 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use App\Events\DriverLocationUpdated;
 use App\Events\RideAccepted;
+use App\Events\RideTaken;
+use App\Events\RideNegotiationConfirmed;
+use App\Events\RideFareProposed;
+use App\Events\RideEnroute;
 use App\Events\RideRequested;
 use App\Events\RideDeclined;
 use App\Events\RideCancelled;
@@ -19,8 +23,8 @@ use App\Events\RideStopUpdated;
 use App\Events\RideArrived;
 use App\Models\FcmToken;
 use App\Services\FcmService;
+use App\Services\PassengerBonusService;
 use App\Services\RideService;
-use App\Support\DriverDebt;
 
 use App\Models\PricingSetting;
 
@@ -31,10 +35,12 @@ use Illuminate\Database\Eloquent\Builder;
 class TripsController extends Controller
 {
     protected $rideService;
+    protected $passengerBonusService;
 
-    public function __construct(RideService $rideService)
+    public function __construct(RideService $rideService, PassengerBonusService $passengerBonusService)
     {
         $this->rideService = $rideService;
+        $this->passengerBonusService = $passengerBonusService;
     }
 
     protected function apiError(string $code, string $message, int $status, array $errors = []): \Illuminate\Http\JsonResponse
@@ -140,7 +146,7 @@ class TripsController extends Controller
         );
 
         $user = Auth::guard('sanctum')->user();
-        $eligibleForFirstRideDiscount = true; // Toujours actif pour les tests
+        $eligibleForFirstRideDiscount = $this->passengerBonusService->isEligible($user);
 
         return response()->json([
             'price' => $price,
@@ -233,7 +239,7 @@ class TripsController extends Controller
         );
 
         $user = Auth::guard('sanctum')->user();
-        $eligibleForFirstRideDiscount = true; // Toujours actif pour les tests
+        $eligibleForFirstRideDiscount = $this->passengerBonusService->isEligible($user);
 
         return response()->json([
             'price'      => $totalPrice,
@@ -382,8 +388,16 @@ class TripsController extends Controller
             return $block;
         }
 
+        if ($paymentMethod === 'bonus' && ! $this->passengerBonusService->isEligible($user)) {
+            return $this->apiError(
+                'PASSENGER_BONUS_UNAVAILABLE',
+                'Votre bonus de première course a déjà été utilisé.',
+                422
+            );
+        }
+
         try {
-            return DB::transaction(function () use ($user, $isMultipart, $v, $request, $pickupLat, $pickupLng, $pickupLabel, $dropoffLat, $dropoffLng, $dropoffLabel, $distanceM, $durationS, $orderMode, $durationHours, $vehicleType, $hasBaggage, $luggageCount, $paymentMethod, $serviceType, $recipientName, $recipientPhone, $packageDescription, $packageWeight, $isFragile, $passengerName, $passengerPhone, $riderVoiceNote) {
+            return DB::transaction(function () use ($user, $isMultipart, $v, $request, $pickupLat, $pickupLng, $pickupLabel, $dropoffLat, $dropoffLng, $dropoffLabel, $distanceM, $durationS, $orderMode, $durationHours, $vehicleType, $hasBaggage, $luggageCount, $paymentMethod, $serviceType, $recipientName, $recipientPhone, $packageDescription, $packageWeight, $isFragile, $passengerName, $passengerPhone, $riderVoiceNote, $pricingMode) {
 
                 // SEC-02 : tarif exclusivement calcule cote serveur (distance client + grilles ; le champ price est ignore).
                 if ($orderMode === 'duration' && $durationHours) {
@@ -423,9 +437,10 @@ class TripsController extends Controller
                 $originalFareAmount = $fareAmount;
                 $discountAmount = 0;
                 $promoCodeId = null;
+                $isFirstRide = $this->passengerBonusService->isEligible($user);
 
-                if ($paymentMethod === 'bonus') {
-                    $discountAmount = 500;
+                if ($paymentMethod === 'bonus' && $isFirstRide) {
+                    $discountAmount = PassengerBonusService::FIRST_RIDE_BONUS;
                 }
 
                 // 1. Calculer la réduction potentielle du code promo
@@ -449,10 +464,9 @@ class TripsController extends Controller
                 }
 
                 // 2. Appliquer la réduction automatique de 30% sur la première course (acquisition)
-                $isFirstRide = true; // Toujours actif pour les tests
                 $firstRideDiscount = 0;
                 if ($isFirstRide && $orderMode === 'distance') {
-                    $firstRideDiscount = 500; // Réduction forfaitaire de 500 F
+                    $firstRideDiscount = PassengerBonusService::FIRST_RIDE_BONUS;
                 }
 
                 // Choisir la remise la plus avantageuse
@@ -578,16 +592,6 @@ class TripsController extends Controller
             ], 403);
         }
 
-        // §20.6 — Blocage automatique pour dette (niveau 3)
-        $balance = (float) DB::table('wallets')->where('user_id', $driver->id)->value('balance');
-        if (DriverDebt::isBlockedByDebt($balance)) {
-            return response()->json([
-                'code' => 'debt_block',
-                'message' => 'Compte bloqué : votre dette dépasse ' . number_format(DriverDebt::blockThreshold(), 0, ',', ' ') . ' F. Réglez votre dette pour accepter des courses.',
-                'debt_amount' => DriverDebt::amount($balance),
-            ], 403);
-        }
-
         $ride = null;
 
         try {
@@ -653,25 +657,46 @@ class TripsController extends Controller
             ]);
         }
 
-        broadcast(new RideAccepted($ride));
+        rescue(fn () => broadcast(new RideAccepted($ride)));
+
+        // Retirer instantanément l'offre de TOUS les autres chauffeurs : le perdant
+        // d'une course-course voit « course perdue » plutôt qu'une erreur.
+        rescue(fn () => broadcast(new RideTaken((int) $ride->id, (int) $driver->id)));
 
         // Notify passenger
         try {
             $passenger = $ride->rider;
             if ($passenger) {
                 $fcm = app(FcmService::class);
+                // Course négociable : le passager doit d'abord confirmer le chauffeur
+                // (négociation verbale). Course fixe : le chauffeur est déjà en route.
+                $isNegotiable = ($ride->pricing_mode ?? 'fixed') === 'negotiable';
                 $fcm->sendToUser(
                     $passenger,
-                    "Course acceptée !",
-                    "Votre chauffeur " . $driver->name . " est en route.",
-                    ['ride_id' => (string) $ride->id, 'type' => 'ride_accepted']
+                    $isNegotiable ? "Un chauffeur a pris votre course" : "Course acceptée !",
+                    $isNegotiable
+                        ? $driver->name . " souhaite vous prendre. Confirmez après accord sur le prix."
+                        : "Votre chauffeur " . $driver->name . " est en route.",
+                    [
+                        'ride_id' => (string) $ride->id,
+                        'type' => $isNegotiable ? 'ride_negotiation_pending' : 'ride_accepted',
+                    ]
                 );
             }
         } catch (\Exception $e) {
             \Log::error("FCM Ride Accepted Notification Error: " . $e->getMessage());
         }
 
-        return response()->json(['ok' => true, 'ride_id' => $ride->id, 'status' => $ride->status]);
+        // Course fixe : toujours confirmée. Négociable : true seulement si le
+        // passager a déjà confirmé (même sémantique que driverRideShow).
+        $isNegotiable = ($ride->pricing_mode ?? 'fixed') === 'negotiable';
+        return response()->json([
+            'ok' => true,
+            'ride_id' => $ride->id,
+            'status' => $ride->status,
+            'pricing_mode' => $ride->pricing_mode ?? 'fixed',
+            'negotiation_confirmed' => !$isNegotiable || $ride->negotiation_confirmed_at !== null,
+        ]);
     }
 
 
@@ -704,7 +729,7 @@ class TripsController extends Controller
         $ride->offered_driver_id = null;
         $ride->save();
 
-        broadcast(new RideDeclined($ride->fresh(['rider']), $driver));
+        rescue(fn () => broadcast(new RideDeclined($ride->fresh(['rider']), $driver)));
 
         $nextDriver = $this->offerRideToNextDriver($ride);
 
@@ -713,6 +738,163 @@ class TripsController extends Controller
             'reoffered' => $nextDriver !== null,
             'next_driver_id' => $nextDriver?->id,
         ]);
+    }
+
+    /**
+     * POST /driver/trips/{id}/propose-fare
+     *
+     * Négociation verbale : le chauffeur propose le prix convenu au téléphone.
+     * Enregistre `negotiated_fare` (proposé, pas encore verrouillé) et le pousse
+     * en direct sur l'écran de confirmation du passager. Réutilisable tant que le
+     * passager n'a pas confirmé.
+     */
+    public function proposeFare(Request $request, int $id)
+    {
+        /** @var User|null $driver */
+        $driver = Auth::user();
+        if (!$driver || !$driver->isDriver()) {
+            return $this->apiForbidden();
+        }
+
+        $data = $request->validate([
+            'fare' => ['required', 'integer', 'min:100', 'max:1000000'],
+        ]);
+
+        $ride = Ride::where('id', $id)->where('driver_id', $driver->id)->first();
+        if (!$ride) {
+            return $this->apiError('RIDE_NOT_FOUND', 'Course introuvable.', 404);
+        }
+        if (($ride->pricing_mode ?? 'fixed') !== 'negotiable') {
+            return $this->apiError('NOT_NEGOTIABLE', 'Cette course n\'est pas négociable.', 422);
+        }
+        if ($ride->negotiation_confirmed_at !== null) {
+            return $this->apiError('ALREADY_CONFIRMED', 'Le prix a déjà été confirmé.', 422);
+        }
+        if ($ride->status !== 'accepted') {
+            return $this->apiError('INVALID_STATE', 'Course non modifiable.', 422);
+        }
+
+        $ride->negotiated_fare = (int) $data['fare'];
+        $ride->save();
+
+        rescue(fn () => broadcast(new RideFareProposed($ride)));
+
+        return response()->json([
+            'ok' => true,
+            'ride_id' => $ride->id,
+            'proposed_fare' => (int) $ride->negotiated_fare,
+        ]);
+    }
+
+    /**
+     * POST /driver/trips/{id}/enroute
+     *
+     * Le chauffeur part chercher le client. Notifie le passager (bouton
+     * « Suivre mon chauffeur sur la carte »). N'altère pas le statut : le suivi
+     * s'appuie sur les positions GPS déjà diffusées.
+     */
+    public function enroute(Request $request, int $id)
+    {
+        /** @var User|null $driver */
+        $driver = Auth::user();
+        if (!$driver || !$driver->isDriver()) {
+            return $this->apiForbidden();
+        }
+
+        $ride = Ride::where('id', $id)->where('driver_id', $driver->id)->first();
+        if (!$ride) {
+            return $this->apiError('RIDE_NOT_FOUND', 'Course introuvable.', 404);
+        }
+
+        rescue(fn () => broadcast(new RideEnroute((int) $ride->id, (int) $ride->rider_id)));
+
+        return response()->json(['ok' => true, 'ride_id' => $ride->id]);
+    }
+
+    /**
+     * POST /passenger/rides/{id}/confirm-negotiation
+     *
+     * Négociation verbale : le passager confirme le chauffeur qui a pris sa
+     * course négociable (après accord sur le prix au téléphone). Active
+     * « Aller chercher mon client » côté chauffeur.
+     */
+    public function confirmNegotiation(Request $request, int $id)
+    {
+        /** @var User|null $user */
+        $user = Auth::user();
+
+        $ride = Ride::where('id', $id)->where('rider_id', $user?->id)->first();
+        if (!$ride) {
+            return $this->apiError('RIDE_NOT_FOUND', 'Course introuvable.', 404);
+        }
+        if (($ride->pricing_mode ?? 'fixed') !== 'negotiable') {
+            return $this->apiError('NOT_NEGOTIABLE', 'Cette course n\'est pas négociable.', 422);
+        }
+        if ($ride->status !== 'accepted' || !$ride->driver_id) {
+            return $this->apiError('NO_DRIVER_TO_CONFIRM', 'Aucun chauffeur en attente de confirmation.', 422);
+        }
+
+        // Prix optionnel convenu verbalement ; sinon on garde l'estimation.
+        $agreedFare = $request->input('agreed_fare');
+        if (is_numeric($agreedFare) && (int) $agreedFare > 0) {
+            $ride->negotiated_fare = (int) $agreedFare;
+        }
+        $ride->negotiation_confirmed_at = now();
+        $ride->save();
+
+        rescue(fn () => broadcast(new RideNegotiationConfirmed($ride, (int) $ride->driver_id, true)));
+
+        return response()->json([
+            'ok' => true,
+            'ride_id' => $ride->id,
+            'negotiation_confirmed' => true,
+            'fare' => (int) ($ride->negotiated_fare ?? $ride->fare_amount ?? 0),
+        ]);
+    }
+
+    /**
+     * POST /passenger/rides/{id}/reject-negotiation
+     *
+     * Le passager refuse le chauffeur (pas d'accord sur le prix). La course
+     * retourne dans le pool (statut 'requested'), le chauffeur est écarté et
+     * notifié, les autres chauffeurs la revoient.
+     */
+    public function rejectNegotiation(Request $request, int $id)
+    {
+        /** @var User|null $user */
+        $user = Auth::user();
+
+        $ride = Ride::where('id', $id)->where('rider_id', $user?->id)->first();
+        if (!$ride) {
+            return $this->apiError('RIDE_NOT_FOUND', 'Course introuvable.', 404);
+        }
+        if (($ride->pricing_mode ?? 'fixed') !== 'negotiable') {
+            return $this->apiError('NOT_NEGOTIABLE', 'Cette course n\'est pas négociable.', 422);
+        }
+        if ($ride->status !== 'accepted' || !$ride->driver_id) {
+            return $this->apiError('NO_DRIVER_TO_REJECT', 'Aucun chauffeur à refuser.', 422);
+        }
+
+        $rejectedDriverId = (int) $ride->driver_id;
+
+        $declined = $ride->declined_driver_ids ?? [];
+        if (!in_array($rejectedDriverId, $declined, true)) {
+            $declined[] = $rejectedDriverId;
+        }
+
+        $ride->declined_driver_ids = $declined;
+        $ride->driver_id = null;
+        $ride->offered_driver_id = null;
+        $ride->accepted_at = null;
+        $ride->negotiation_confirmed_at = null;
+        $ride->status = 'requested';
+        $ride->save();
+
+        // Prévenir le chauffeur écarté puis remettre la course dans le pool.
+        rescue(fn () => broadcast(new RideNegotiationConfirmed($ride, $rejectedDriverId, false)));
+        rescue(fn () => broadcast(new RideRequested($ride)));
+
+        return response()->json(['ok' => true, 'ride_id' => $ride->id, 'status' => 'requested']);
     }
 
     public function arrived(Request $request, int $id)
@@ -730,7 +912,7 @@ class TripsController extends Controller
         $ride->save();
 
         try {
-            broadcast(new RideArrived($ride->id, $ride->rider_id, $ride->arrived_at->toIso8601String()));
+            rescue(fn () => broadcast(new RideArrived($ride->id, $ride->rider_id, $ride->arrived_at->toIso8601String())));
             \Log::info("[Arrived] Broadcast sent for ride {$ride->id} to rider {$ride->rider_id}");
         } catch (\Exception $e) {
             \Log::error("[Arrived] Broadcast FAILED for ride {$ride->id}: " . $e->getMessage());
@@ -767,7 +949,7 @@ class TripsController extends Controller
         $ride->started_at = now();
         $ride->save();
 
-        broadcast(new RideStarted($ride));
+        rescue(fn () => broadcast(new RideStarted($ride)));
 
         // Notify passenger
         try {
@@ -852,7 +1034,7 @@ class TripsController extends Controller
         $ride->cancellation_reason = $data['reason'] ?? null;
         $ride->save();
 
-        broadcast(new RideCancelled($ride->fresh(['driver', 'rider']), 'driver', $driver));
+        rescue(fn () => broadcast(new RideCancelled($ride->fresh(['driver', 'rider']), 'driver', $driver)));
 
         // Notify passenger
         try {
@@ -890,7 +1072,7 @@ class TripsController extends Controller
         $ride->cancellation_reason = $data['reason'] ?? null;
         $ride->save();
 
-        broadcast(new RideCancelled($ride, 'passenger', $user));
+        rescue(fn () => broadcast(new RideCancelled($ride, 'passenger', $user)));
 
         // Notify driver
         try {
@@ -948,18 +1130,6 @@ class TripsController extends Controller
             'online' => ['required', 'boolean'],
         ]);
 
-        // §20.6 — Blocage automatique pour dette : empêche de repasser en ligne
-        if ((bool) $data['online'] === true) {
-            $balance = (float) DB::table('wallets')->where('user_id', $driver->id)->value('balance');
-            if (DriverDebt::isBlockedByDebt($balance)) {
-                return response()->json([
-                    'code' => 'debt_block',
-                    'message' => 'Compte bloqué : votre dette dépasse ' . number_format(DriverDebt::blockThreshold(), 0, ',', ' ') . ' F. Réglez votre dette pour repasser en ligne.',
-                    'debt_amount' => DriverDebt::amount($balance),
-                ], 403);
-            }
-        }
-
         $driver->is_online = (bool) $data['online'];
         $driver->save();
 
@@ -1009,6 +1179,10 @@ class TripsController extends Controller
             $data = array_merge($ride->toArray(), $breakdown);
             // Map rating.stars to rating for frontend
             $data['rating'] = $ride->rating ? $ride->rating->stars : null;
+            // Négociation verbale : true si course fixe OU passager a déjà confirmé.
+            // C'est ce booléen qui active « Aller chercher mon client » côté chauffeur.
+            $isNegotiable = ($ride->pricing_mode ?? 'fixed') === 'negotiable';
+            $data['negotiation_confirmed'] = !$isNegotiable || $ride->negotiation_confirmed_at !== null;
             return response()->json($data);
         }
         return response()->json($ride);
@@ -1148,6 +1322,11 @@ class TripsController extends Controller
             'payment_method' => $ride->payment_method,
             'payment_status' => $ride->payment_status,
             'payment_link' => $ride->payment_link,
+            // Négociation : nécessaire pour router le passager vers l'écran
+            // Confirmer/Refuser (verbal) au lieu du suivi direct.
+            'pricing_mode' => $ride->pricing_mode ?? 'fixed',
+            'negotiated_fare' => $ride->negotiated_fare,
+            'negotiation_confirmed_at' => $ride->negotiation_confirmed_at,
             ...$this->calculateRideFareBreakdown($ride),
         ]);
     }
@@ -1332,6 +1511,12 @@ class TripsController extends Controller
             'stop_started_at' => $ride->stop_started_at,
             'total_stop_duration_s' => $ride->total_stop_duration_s,
             'payment_method' => $ride->payment_method,
+            // Négociation : indispensables au gating de « Aller chercher mon client ».
+            'pricing_mode' => $ride->pricing_mode ?? 'fixed',
+            'negotiated_fare' => $ride->negotiated_fare,
+            'negotiation_confirmed_at' => $ride->negotiation_confirmed_at,
+            'negotiation_confirmed' => ($ride->pricing_mode ?? 'fixed') !== 'negotiable'
+                || $ride->negotiation_confirmed_at !== null,
             ...$this->calculateRideFareBreakdown($ride),
         ]);
     }
@@ -1387,6 +1572,8 @@ class TripsController extends Controller
                     'has_baggage' => (bool) $ride->has_baggage,
                     'service_type' => $ride->service_type,
                     'payment_method' => $ride->payment_method,
+                    'pricing_mode' => $ride->pricing_mode ?? 'fixed',
+                    'negotiated_fare' => $ride->negotiated_fare,
                 ];
             });
 
@@ -1450,6 +1637,8 @@ class TripsController extends Controller
                 'has_baggage' => (bool) $ride->has_baggage,
                 'service_type' => $ride->service_type,
                 'payment_method' => $ride->payment_method,
+                'pricing_mode' => $ride->pricing_mode ?? 'fixed',
+                'negotiated_fare' => $ride->negotiated_fare,
             ];
         });
 
@@ -1594,14 +1783,14 @@ class TripsController extends Controller
         // Le broadcast Pusher/Reverb reste instantané — le passager voit toujours
         // la voiture bouger en temps réel, indépendamment de la persistance SQL.
         if ($ride) {
-            broadcast(new DriverLocationUpdated(
+            rescue(fn () => broadcast(new DriverLocationUpdated(
                 $ride->id,
                 [
                     'lat'        => $lat,
                     'lng'        => $lng,
                     'updated_at' => now()->toIso8601String(),
                 ]
-            ));
+            )));
         }
 
         return response()->json([
@@ -1903,7 +2092,7 @@ class TripsController extends Controller
         $ride->stop_started_at = now();
         $ride->save();
 
-        broadcast(new RideStopUpdated($ride));
+        rescue(fn () => broadcast(new RideStopUpdated($ride)));
 
         return response()->json(['ok' => true, 'stop_started_at' => $ride->stop_started_at]);
     }
@@ -1926,7 +2115,7 @@ class TripsController extends Controller
         $ride->stop_started_at = null;
         $ride->save();
 
-        broadcast(new RideStopUpdated($ride));
+        rescue(fn () => broadcast(new RideStopUpdated($ride)));
 
         return response()->json(['ok' => true, 'total_stop_duration_s' => $ride->total_stop_duration_s]);
     }

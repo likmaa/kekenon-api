@@ -248,6 +248,12 @@ class RideCompletionService
                 ->where('user_id', $driver->id)
                 ->decrement('subscription_remaining_rides', 1);
 
+            // Renouvellement automatique : avoir de l'argent (solde ou bonus) = avoir
+            // l'abonnement. Pack épuisé → 500 F prélevés (solde d'abord, bonus en
+            // complément) et 10 courses recréditées. Zéro dette : sans fonds
+            // suffisants, le compteur reste épuisé et l'app invite à recharger.
+            $this->autoRenewSubscriptionIfNeeded($driver->id, (int) $ride->id);
+
             // Prélèvement de 25 F de frais de plateforme sur le portefeuille du passager
             $passengerWallet = DB::table('wallets')->where('user_id', $ride->rider_id)->lockForUpdate()->first();
             if (!$passengerWallet) {
@@ -260,22 +266,26 @@ class RideCompletionService
                 ]);
                 $passengerWallet = (object) ['id' => $pWid, 'balance' => 0];
             }
+            // Modèle zéro dette : on ne prélève jamais au-delà du solde disponible.
             $pBefore = (int) $passengerWallet->balance;
-            $pAfter = $pBefore - 25;
-            DB::table('wallet_transactions')->insert([
-                'wallet_id' => $passengerWallet->id,
-                'type' => 'debit',
-                'source' => 'app_fee',
-                'amount' => 25,
-                'balance_before' => $pBefore,
-                'balance_after' => $pAfter,
-                'meta' => json_encode(['ride_id' => $ride->id, 'desc' => 'Frais de plateforme Kêkênon']),
-                'created_at' => now(),
-            ]);
-            DB::table('wallets')->where('id', $passengerWallet->id)->update([
-                'balance' => $pAfter,
-                'updated_at' => now(),
-            ]);
+            $pFee = min(25, max(0, $pBefore));
+            if ($pFee > 0) {
+                $pAfter = $pBefore - $pFee;
+                DB::table('wallet_transactions')->insert([
+                    'wallet_id' => $passengerWallet->id,
+                    'type' => 'debit',
+                    'source' => 'app_fee',
+                    'amount' => $pFee,
+                    'balance_before' => $pBefore,
+                    'balance_after' => $pAfter,
+                    'meta' => json_encode(['ride_id' => $ride->id, 'desc' => 'Frais de plateforme Kêkênon']),
+                    'created_at' => now(),
+                ]);
+                DB::table('wallets')->where('id', $passengerWallet->id)->update([
+                    'balance' => $pAfter,
+                    'updated_at' => now(),
+                ]);
+            }
 
             $ride->save();
 
@@ -323,7 +333,7 @@ class RideCompletionService
         });
 
         // Broadcast APRÈS commit
-        broadcast(new RideCompleted($result['ride']));
+        rescue(fn () => broadcast(new RideCompleted($result['ride'])));
 
         // Notifier le passager via FCM
         try {
@@ -347,6 +357,96 @@ class RideCompletionService
         ]);
 
         return $result;
+    }
+
+    /** Prix (F CFA) et taille (courses) du pack d'abonnement chauffeur. */
+    private const SUBSCRIPTION_PRICE = 500;
+    private const SUBSCRIPTION_RIDES = 10;
+
+    /**
+     * Renouvelle l'abonnement depuis le portefeuille dès que le pack est épuisé
+     * (compteur ≤ 0) : débit du solde principal d'abord, bonus en complément.
+     * Doit être appelé DANS la transaction de complétion.
+     */
+    private function autoRenewSubscriptionIfNeeded(int $driverId, int $rideId): void
+    {
+        $remaining = DB::table('driver_profiles')
+            ->where('user_id', $driverId)
+            ->value('subscription_remaining_rides');
+
+        if ($remaining === null || (int) $remaining > 0) {
+            return; // Pas de profil, ou pack encore actif.
+        }
+
+        $wallet = DB::table('wallets')->where('user_id', $driverId)->lockForUpdate()->first();
+        if (!$wallet) {
+            return;
+        }
+
+        $balance = (int) $wallet->balance;
+        $bonus = (int) ($wallet->bonus_balance ?? 0);
+        if ($balance + $bonus < self::SUBSCRIPTION_PRICE) {
+            return; // Zéro dette : pas de fonds, pas de renouvellement.
+        }
+
+        $fromBalance = min($balance, self::SUBSCRIPTION_PRICE);
+        $fromBonus = self::SUBSCRIPTION_PRICE - $fromBalance;
+        $afterBalance = $balance - $fromBalance;
+        $afterBonus = $bonus - $fromBonus;
+
+        DB::table('wallets')->where('id', $wallet->id)->update([
+            'balance' => $afterBalance,
+            'bonus_balance' => $afterBonus,
+            'updated_at' => now(),
+        ]);
+
+        if ($fromBalance > 0) {
+            DB::table('wallet_transactions')->insert([
+                'wallet_id' => $wallet->id,
+                'type' => 'debit',
+                'source' => 'subscription_fee',
+                'amount' => $fromBalance,
+                'balance_before' => $balance,
+                'balance_after' => $afterBalance,
+                'meta' => json_encode([
+                    'desc' => 'Renouvellement auto — abonnement 10 courses',
+                    'auto' => true,
+                    'ride_id' => $rideId,
+                    'bonus_used' => $fromBonus,
+                ]),
+                'created_at' => now(),
+            ]);
+        }
+        if ($fromBonus > 0) {
+            DB::table('wallet_transactions')->insert([
+                'wallet_id' => $wallet->id,
+                'type' => 'debit',
+                'source' => 'subscription_fee_bonus',
+                'amount' => $fromBonus,
+                // Le solde principal ne bouge pas sur la part bonus
+                'balance_before' => $afterBalance,
+                'balance_after' => $afterBalance,
+                'meta' => json_encode([
+                    'desc' => 'Renouvellement auto payé avec le bonus Kêkênon',
+                    'auto' => true,
+                    'ride_id' => $rideId,
+                    'bonus_before' => $bonus,
+                    'bonus_after' => $afterBonus,
+                ]),
+                'created_at' => now(),
+            ]);
+        }
+
+        DB::table('driver_profiles')
+            ->where('user_id', $driverId)
+            ->increment('subscription_remaining_rides', self::SUBSCRIPTION_RIDES);
+
+        Log::info('Subscription auto-renewed from wallet', [
+            'driver_id' => $driverId,
+            'ride_id' => $rideId,
+            'from_balance' => $fromBalance,
+            'from_bonus' => $fromBonus,
+        ]);
     }
 
     private function isCurrentlyInTimeRange(string $start, string $end): bool

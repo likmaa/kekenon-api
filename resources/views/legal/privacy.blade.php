@@ -75,7 +75,7 @@
     <p>Vos données ne sont jamais vendues à des tiers. Elles peuvent être partagées avec :</p>
     <ul>
         <li><strong>Les chauffeurs/passagers</strong> : nom et position pour le bon déroulement de la course</li>
-        <li><strong>Les prestataires de paiement</strong> : pour le traitement des transactions (GeniusPay, opérateurs Mobile Money)</li>
+        <li><strong>Les prestataires de paiement</strong> : pour le traitement des transactions (PawaPay, opérateurs Mobile Money)</li>
         <li><strong>Les autorités</strong> : sur demande légale dûment fondée</li>
     </ul>
 

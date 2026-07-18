@@ -35,15 +35,12 @@ return [
         ],
     ],
 
-    'geniuspay' => [
-        /** Clé publique marchand (pk_sandbox_… / pk_live_…). */
-        'public_key' => env('GENIUSPAY_PUBLIC_KEY'),
-        /** Clé secrète marchand (sk_sandbox_… / sk_live_…). */
-        'secret_key' => env('GENIUSPAY_SECRET_KEY'),
-        /** @deprecated Utiliser public_key + secret_key. Conservé pour migration (pk_ ou sk_ seul). */
-        'api_key' => env('GENIUSPAY_API_KEY'),
-        'webhook_secret' => env('GENIUSPAY_WEBHOOK_SECRET'),
-        'sandbox' => env('GENIUSPAY_SANDBOX', true),
+    'pawapay' => [
+        /** Jeton API (Bearer) généré depuis le tableau de bord PawaPay. */
+        'api_token' => env('PAWAPAY_API_TOKEN'),
+        /** URL de base ; par défaut déduite de « sandbox ». */
+        'base_url' => env('PAWAPAY_BASE_URL'),
+        'sandbox' => env('PAWAPAY_SANDBOX', true),
     ],
 
     'mapbox' => [
