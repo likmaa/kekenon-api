@@ -11,6 +11,13 @@ use App\Models\User;
 
 class StatsController extends Controller
 {
+    private function zemRides()
+    {
+        return Ride::query()->where(function ($query) {
+            $query->where('service_type', 'course')->orWhereNull('service_type');
+        });
+    }
+
     public function overview(Request $request)
     {
         $now = Carbon::now();
@@ -23,16 +30,19 @@ class StatsController extends Controller
             ->where('is_online', true)
             ->count();
 
-        $activeRides = Ride::query()
+        $activeRides = $this->zemRides()
             ->whereIn('status', ['requested', 'accepted', 'ongoing'])
             ->count();
 
-        $todayCompletedQuery = Ride::query()
+        $todayCompletedQuery = $this->zemRides()
             ->where('status', 'completed')
             ->whereBetween('completed_at', [$startOfDay, $endOfDay]);
 
         $todayCompletedCount = (int) $todayCompletedQuery->count();
-        $todayRideRevenue = (int) $todayCompletedQuery->sum('fare_amount');
+        $todayRideRevenue = (int) Ride::query()
+            ->where('status', 'completed')
+            ->whereBetween('completed_at', [$startOfDay, $endOfDay])
+            ->sum('fare_amount');
 
         // Revenus Externes (Hors-App) du jour
         $todayExternalRevenue = (int) DB::table('wallet_transactions')
@@ -61,11 +71,14 @@ class StatsController extends Controller
         // --- Comparaison avec hier (deltas réels) ---
         $startYesterday = $startOfDay->copy()->subDay();
         $endYesterday = $endOfDay->copy()->subDay();
-        $yesterdayCompletedQuery = Ride::query()
+        $yesterdayCompletedQuery = $this->zemRides()
             ->where('status', 'completed')
             ->whereBetween('completed_at', [$startYesterday, $endYesterday]);
         $yesterdayCompletedCount = (int) $yesterdayCompletedQuery->count();
-        $yesterdayRevenueAmount = (int) (clone $yesterdayCompletedQuery)->sum('fare_amount');
+        $yesterdayRevenueAmount = (int) Ride::query()
+            ->where('status', 'completed')
+            ->whereBetween('completed_at', [$startYesterday, $endYesterday])
+            ->sum('fare_amount');
 
         // --- KPI 5 : Utilisateurs actifs (passagers ayant commandé sur 30 jours) ---
         $activeUsers30d = (int) Ride::query()
@@ -74,11 +87,11 @@ class StatsController extends Controller
             ->distinct('rider_id')
             ->count('rider_id');
 
-        // --- KPI 6 : Taux d'acceptation (courses du jour ayant trouvé un chauffeur) ---
-        $requestedToday = (int) Ride::query()
+        // --- KPI 6 : Taux d'acceptation des courses zem du jour ---
+        $requestedToday = (int) $this->zemRides()
             ->whereBetween('created_at', [$startOfDay, $endOfDay])
             ->count();
-        $acceptedToday = (int) Ride::query()
+        $acceptedToday = (int) $this->zemRides()
             ->whereBetween('created_at', [$startOfDay, $endOfDay])
             ->whereNotNull('accepted_at')
             ->count();
@@ -87,7 +100,7 @@ class StatsController extends Controller
             : null;
 
         // --- KPI 8 : Temps moyen d'attribution (created_at -> accepted_at, courses du jour) ---
-        $avgAssignmentSec = (float) Ride::query()
+        $avgAssignmentSec = (float) $this->zemRides()
             ->whereNotNull('accepted_at')
             ->whereBetween('accepted_at', [$startOfDay, $endOfDay])
             ->selectRaw(DB::connection()->getDriverName() === 'sqlite' ? "AVG(strftime('%s', accepted_at) - strftime('%s', created_at)) as avg_sec" : "AVG(TIMESTAMPDIFF(SECOND, created_at, accepted_at)) as avg_sec")
@@ -179,11 +192,18 @@ class StatsController extends Controller
 
         $series = [];
         foreach ($buckets as $b) {
-            $completed = Ride::query()
+            $completedActivities = Ride::query()
+                ->where('status', 'completed')
+                ->whereBetween('completed_at', [$b['start'], $b['end']]);
+            $completedRides = $this->zemRides()
+                ->where('status', 'completed')
+                ->whereBetween('completed_at', [$b['start'], $b['end']]);
+            $completedDeliveries = Ride::query()
+                ->where('service_type', 'livraison')
                 ->where('status', 'completed')
                 ->whereBetween('completed_at', [$b['start'], $b['end']]);
 
-            $rideRevenue = (int) (clone $completed)->sum('fare_amount');
+            $rideRevenue = (int) (clone $completedActivities)->sum('fare_amount');
 
             $externalRevenue = (int) DB::table('wallet_transactions')
                 ->where('source', 'external_revenue')
@@ -197,7 +217,8 @@ class StatsController extends Controller
             $series[] = [
                 'label' => $b['label'],
                 'revenue' => $rideRevenue + $externalRevenue,
-                'rides' => (int) (clone $completed)->count(),
+                'rides' => (int) $completedRides->count(),
+                'deliveries' => (int) $completedDeliveries->count(),
                 'new_users' => (int) User::query()
                     ->where('role', 'passenger')
                     ->whereBetween('created_at', [$b['start'], $b['end']])
@@ -226,18 +247,18 @@ class StatsController extends Controller
         $onlineDrivers = User::query()
             ->where('role', 'driver')->where('is_active', true)->where('is_online', true)->count();
 
-        $pendingRides = (int) Ride::query()
+        $pendingRides = (int) $this->zemRides()
             ->where('status', 'requested')
             ->where('created_at', '<=', $now->copy()->subMinutes(5))
             ->count();
 
-        // CRITIQUE : demandes en attente alors qu'aucun chauffeur n'est en ligne
+        // CRITIQUE : demandes en attente alors qu'aucun zem n'est en ligne
         if ($pendingRides > 0 && $onlineDrivers === 0) {
             $alerts[] = [
                 'severity' => 'critique',
                 'code' => 'no_driver_online',
-                'title' => 'Aucun chauffeur en ligne',
-                'detail' => "{$pendingRides} course(s) en attente sans aucun chauffeur connecté.",
+                'title' => 'Aucun zem en ligne',
+                'detail' => "{$pendingRides} course(s) en attente sans aucun zem connecté.",
             ];
         }
 
@@ -246,14 +267,14 @@ class StatsController extends Controller
             $alerts[] = [
                 'severity' => 'elevee',
                 'code' => 'pending_unassigned',
-                'title' => 'Courses sans chauffeur',
+                'title' => 'Courses sans zem',
                 'detail' => "{$pendingRides} course(s) en attente d'attribution depuis plus de 5 min.",
             ];
         }
 
         // ÉLEVÉE : taux d'annulation du jour élevé
-        $createdToday = (int) Ride::query()->whereBetween('created_at', [$startOfDay, $endOfDay])->count();
-        $cancelledToday = (int) Ride::query()->whereBetween('cancelled_at', [$startOfDay, $endOfDay])->count();
+        $createdToday = (int) $this->zemRides()->whereBetween('created_at', [$startOfDay, $endOfDay])->count();
+        $cancelledToday = (int) $this->zemRides()->whereBetween('cancelled_at', [$startOfDay, $endOfDay])->count();
         if ($createdToday >= 5) {
             $cancelRate = round(($cancelledToday / $createdToday) * 100, 1);
             if ($cancelRate >= 30) {
@@ -267,8 +288,8 @@ class StatsController extends Controller
         }
 
         // MOYENNE : baisse d'activité vs hier
-        $todayCompleted = (int) Ride::query()->where('status', 'completed')->whereBetween('completed_at', [$startOfDay, $endOfDay])->count();
-        $yCompleted = (int) Ride::query()->where('status', 'completed')
+        $todayCompleted = (int) $this->zemRides()->where('status', 'completed')->whereBetween('completed_at', [$startOfDay, $endOfDay])->count();
+        $yCompleted = (int) $this->zemRides()->where('status', 'completed')
             ->whereBetween('completed_at', [$startOfDay->copy()->subDay(), $endOfDay->copy()->subDay()])->count();
         if ($yCompleted >= 4 && $todayCompleted < ($yCompleted * 0.5)) {
             $alerts[] = [
@@ -280,7 +301,7 @@ class StatsController extends Controller
         }
 
         // MOYENNE : taux d'acceptation faible
-        $acceptedToday = (int) Ride::query()->whereBetween('created_at', [$startOfDay, $endOfDay])->whereNotNull('accepted_at')->count();
+        $acceptedToday = (int) $this->zemRides()->whereBetween('created_at', [$startOfDay, $endOfDay])->whereNotNull('accepted_at')->count();
         if ($createdToday >= 5) {
             $accRate = round(($acceptedToday / $createdToday) * 100, 1);
             if ($accRate < 70) {
@@ -288,7 +309,7 @@ class StatsController extends Controller
                     'severity' => 'moyenne',
                     'code' => 'low_acceptance',
                     'title' => "Taux d'acceptation en baisse",
-                    'detail' => "Seulement {$accRate}% des courses du jour ont trouvé un chauffeur.",
+                    'detail' => "Seulement {$accRate}% des courses du jour ont trouvé un zem.",
                 ];
             }
         }
@@ -315,7 +336,7 @@ class StatsController extends Controller
      * (bootstrap/app.php, chaque minute) : une course 'requested' depuis > 10 min
      * est passée en 'cancelled' avec cancellation_reason='timeout_no_driver'.
      * On distingue donc : expirées (timeout_no_driver) / annulées (autres raisons)
-     * / sans chauffeur (encore en attente d'attribution).
+     * / sans zem (encore en attente d'attribution).
      */
     public function dispatch(Request $request)
     {
@@ -325,33 +346,33 @@ class StatsController extends Controller
         $end = $now->copy()->endOfDay();
 
         // --- Dispatch ---
-        $avgAssignmentSec = (float) Ride::query()
+        $avgAssignmentSec = (float) $this->zemRides()
             ->whereNotNull('accepted_at')
             ->whereBetween('accepted_at', [$start, $end])
             ->selectRaw(DB::connection()->getDriverName() === 'sqlite' ? "AVG(strftime('%s', accepted_at) - strftime('%s', created_at)) as v" : "AVG(TIMESTAMPDIFF(SECOND, created_at, accepted_at)) as v")
             ->value('v');
 
-        $avgPickupSec = (float) Ride::query()
+        $avgPickupSec = (float) $this->zemRides()
             ->whereNotNull('accepted_at')
             ->whereNotNull('started_at')
             ->whereBetween('started_at', [$start, $end])
             ->selectRaw(DB::connection()->getDriverName() === 'sqlite' ? "AVG(strftime('%s', started_at) - strftime('%s', accepted_at)) as v" : "AVG(TIMESTAMPDIFF(SECOND, accepted_at, started_at)) as v")
             ->value('v');
 
-        $refusedRides = (int) Ride::query()
+        $refusedRides = (int) $this->zemRides()
             ->whereBetween('created_at', [$start, $end])
             ->whereNotNull('declined_driver_ids')
             ->whereRaw(DB::connection()->getDriverName() === 'sqlite' ? "declined_driver_ids != '[]' AND declined_driver_ids IS NOT NULL" : "JSON_LENGTH(declined_driver_ids) > 0")
             ->count();
 
-        // Expirées : auto-annulées par le scheduler `rides:expire` (timeout sans chauffeur)
-        $expiredRides = (int) Ride::query()
+        // Expirées : auto-annulées par le scheduler `rides:expire` (timeout sans zem)
+        $expiredRides = (int) $this->zemRides()
             ->whereBetween('cancelled_at', [$start, $end])
             ->where('cancellation_reason', 'timeout_no_driver')
             ->count();
 
-        // Annulées : vraies annulations (passager / chauffeur / admin), hors expiration auto
-        $cancelledRides = (int) Ride::query()
+        // Annulées : vraies annulations (passager / zem / admin), hors expiration auto
+        $cancelledRides = (int) $this->zemRides()
             ->whereBetween('cancelled_at', [$start, $end])
             ->where(function ($q) {
                 $q->where('cancellation_reason', '!=', 'timeout_no_driver')
@@ -359,33 +380,56 @@ class StatsController extends Controller
             })
             ->count();
 
-        // Sans chauffeur (en attente) : encore 'requested', non attribuées depuis plus de 5 min
-        $noDriverRides = (int) Ride::query()
+        // Sans zem (en attente) : encore 'requested', non attribuées depuis plus de 5 min
+        $noDriverRides = (int) $this->zemRides()
             ->where('status', 'requested')
             ->whereNull('accepted_at')
             ->where('created_at', '<=', $now->copy()->subMinutes(5))
             ->count();
 
-        // --- KPI Module Courses (§20.4) sur les courses terminées de la période ---
-        $completedQuery = Ride::query()
-            ->where('status', 'completed')
-            ->whereBetween('completed_at', [$start, $end]);
-        $completedCount = (int) (clone $completedQuery)->count();
+        // Les courses zem et les livraisons sont deux activités différentes : leurs
+        // volumes, montants et taux d'annulation ne doivent jamais être mélangés.
+        $activityMetrics = function (string $serviceType) use ($start, $end): array {
+            $scope = function ($query) use ($serviceType) {
+                if ($serviceType === 'livraison') {
+                    return $query->where('service_type', 'livraison');
+                }
 
-        $avgDurationSec = (float) Ride::query()
-            ->where('status', 'completed')
-            ->whereBetween('completed_at', [$start, $end])
-            ->whereNotNull('started_at')
-            ->selectRaw(DB::connection()->getDriverName() === 'sqlite' ? "AVG(strftime('%s', completed_at) - strftime('%s', started_at)) as v" : "AVG(TIMESTAMPDIFF(SECOND, started_at, completed_at)) as v")
-            ->value('v');
+                return $query->where(function ($q) {
+                    $q->where('service_type', 'course')->orWhereNull('service_type');
+                });
+            };
 
-        $avgDistanceM = (float) (clone $completedQuery)->where('distance_m', '>', 0)->avg('distance_m');
-        $avgFare = (float) (clone $completedQuery)->avg('fare_amount');
+            $completedQuery = $scope(Ride::query())
+                ->where('status', 'completed')
+                ->whereBetween('completed_at', [$start, $end]);
+            $completedCount = (int) (clone $completedQuery)->count();
+            $avgDurationSec = (float) $scope(Ride::query())
+                ->where('status', 'completed')
+                ->whereBetween('completed_at', [$start, $end])
+                ->whereNotNull('started_at')
+                ->selectRaw(DB::connection()->getDriverName() === 'sqlite' ? "AVG(strftime('%s', completed_at) - strftime('%s', started_at)) as v" : "AVG(TIMESTAMPDIFF(SECOND, started_at, completed_at)) as v")
+                ->value('v');
+            $createdCount = (int) $scope(Ride::query())->whereBetween('created_at', [$start, $end])->count();
+            $cancelledCount = (int) $scope(Ride::query())->whereBetween('cancelled_at', [$start, $end])->count();
+            $activeCount = (int) $scope(Ride::query())
+                ->whereIn('status', ['requested', 'accepted', 'arrived', 'pickup', 'started', 'ongoing'])
+                ->count();
 
-        $createdInPeriod = (int) Ride::query()->whereBetween('created_at', [$start, $end])->count();
-        $cancellationRate = $createdInPeriod > 0
-            ? round(($cancelledRides / $createdInPeriod) * 100, 1)
-            : null;
+            return [
+                'completed_count' => $completedCount,
+                'active_count' => $activeCount,
+                'cancelled_count' => $cancelledCount,
+                'avg_duration_seconds' => $avgDurationSec > 0 ? (int) round($avgDurationSec) : null,
+                'avg_distance_m' => ($avg = (float) (clone $completedQuery)->where('distance_m', '>', 0)->avg('distance_m')) > 0 ? (int) round($avg) : null,
+                'avg_fare_amount' => ($avg = (float) (clone $completedQuery)->avg('fare_amount')) > 0 ? (int) round($avg) : null,
+                'cancellation_rate_pct' => $createdCount > 0 ? round(($cancelledCount / $createdCount) * 100, 1) : null,
+                'currency' => 'XOF',
+            ];
+        };
+
+        $courseMetrics = $activityMetrics('course');
+        $deliveryMetrics = $activityMetrics('livraison');
 
         return response()->json([
             'period_days' => $days,
@@ -397,14 +441,8 @@ class StatsController extends Controller
                 'cancelled_rides' => $cancelledRides,
                 'no_driver_rides' => $noDriverRides,
             ],
-            'courses' => [
-                'completed_count' => $completedCount,
-                'avg_duration_seconds' => $avgDurationSec > 0 ? (int) round($avgDurationSec) : null,
-                'avg_distance_m' => $avgDistanceM > 0 ? (int) round($avgDistanceM) : null,
-                'avg_fare_amount' => $avgFare > 0 ? (int) round($avgFare) : null,
-                'cancellation_rate_pct' => $cancellationRate,
-                'currency' => 'XOF',
-            ],
+            'courses' => $courseMetrics,
+            'deliveries' => $deliveryMetrics,
             'generated_at' => $now->toIso8601String(),
         ]);
     }
@@ -463,13 +501,14 @@ class StatsController extends Controller
                 'passenger_name' => $r->passenger_name ?: ($r->rider->name ?? null),
                 'passenger_phone' => $r->passenger_phone ?: ($r->rider->phone ?? null),
                 'driver_name' => $r->driver->name ?? null,
+                'service_type' => $r->service_type ?? 'course',
                 'pickup_address' => $r->pickup_address,
                 'dropoff_address' => $r->dropoff_address,
                 'fare' => (int) $r->fare_amount,
                 'status' => $r->status,
                 'cancellation_reason' => $r->cancellation_reason,
                 'datetime' => optional($r->{$dateField})->toIso8601String(),
-                // Distances en km (approche = chauffeur → client, course = prise en charge → destination)
+                // Distances en km (approche = zem → client, course = prise en charge → destination)
                 'approach_km' => $r->approach_distance_m !== null ? round($r->approach_distance_m / 1000, 2) : null,
                 'ride_km' => $r->distance_m !== null ? round($r->distance_m / 1000, 2) : null,
                 'duration_min' => $this->rideEffectiveMinutes($r),
@@ -515,6 +554,13 @@ class StatsController extends Controller
             'passenger_phone' => $r->passenger_phone ?: ($r->rider->phone ?? null),
             'driver_name' => $r->driver->name ?? null,
             'driver_phone' => $r->driver->phone ?? null,
+            'service_type' => $r->service_type ?? 'course',
+            'recipient_name' => $r->recipient_name,
+            'recipient_phone' => $r->recipient_phone,
+            'package_description' => $r->package_description,
+            'package_size' => $r->package_size,
+            'package_weight' => $r->package_weight,
+            'is_fragile' => (bool) $r->is_fragile,
             'pickup_address' => $r->pickup_address,
             'dropoff_address' => $r->dropoff_address,
             'pickup_lat' => $r->pickup_lat,
@@ -625,7 +671,7 @@ class StatsController extends Controller
     }
 
     /**
-     * §20.5 — Score chauffeur (40% activité / 30% satisfaction / 20% ponctualité / 10% discipline)
+     * §20.5 — Score zem (40% activité / 30% satisfaction / 20% ponctualité / 10% discipline)
      * + KPI + classement, sur les N derniers jours (?days=30 par défaut).
      */
     public function driverScores(Request $request)
@@ -745,14 +791,14 @@ class StatsController extends Controller
     }
 
     /**
-     * §20.12 — Carte stratégique : chauffeurs (dispo/occupés), demandes en attente,
+     * §20.12 — Carte stratégique : zems (dispo/occupés), demandes en attente,
      * zones à forte demande / sous-desservies, temps moyen d'attente.
      */
     public function strategicMap(Request $request)
     {
         $now = Carbon::now();
 
-        // Chauffeurs occupés = ayant une course active
+        // Zems occupés = ayant une course active
         $busyIds = Ride::query()
             ->whereIn('status', ['accepted', 'arrived', 'pickup', 'ongoing'])
             ->whereNotNull('driver_id')
@@ -794,7 +840,7 @@ class StatsController extends Controller
             ->selectRaw(DB::connection()->getDriverName() === 'sqlite' ? "AVG(strftime('%s', accepted_at) - strftime('%s', created_at)) as v" : "AVG(TIMESTAMPDIFF(SECOND, created_at, accepted_at)) as v")
             ->value('v');
 
-        // Zones (grille ~1km, demandes des 6 dernières heures vs chauffeurs dispo)
+        // Zones (grille ~1km, demandes des 6 dernières heures vs zems dispo)
         $since = $now->copy()->subHours(6);
         $demandCells = Ride::query()
             ->whereBetween('created_at', [$since, $now])
@@ -803,7 +849,7 @@ class StatsController extends Controller
             ->groupBy('clat', 'clng')
             ->get();
 
-        // Comptage des chauffeurs dispo par cellule
+        // Comptage des zems dispo par cellule
         $driverCells = [];
         foreach ($drivers as $d) {
             if ($d['status'] !== 'available') {

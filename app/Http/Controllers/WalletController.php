@@ -145,6 +145,8 @@ class WalletController extends Controller
         return match ($source) {
             'ride_payment' => 'Paiement course',
             'ride_earnings' => 'Gain course',
+            'delivery_payment' => 'Paiement livraison',
+            'delivery_earnings' => 'Gain livraison',
             'topup_cash' => 'Rechargement (espèces)',
             'topup_qr' => 'Rechargement (QR)',
             'topup_pawapay' => 'Rechargement (Mobile Money)',
@@ -323,7 +325,7 @@ class WalletController extends Controller
                 DB::table('wallet_transactions')->insert([
                     'wallet_id' => $wallet['id'],
                     'type' => 'debit',
-                    'source' => 'ride_payment',
+                    'source' => $ride->service_type === 'livraison' ? 'delivery_payment' : 'ride_payment',
                     'amount' => $walletDebit,
                     'balance_before' => $before,
                     'balance_after' => $after,
@@ -367,7 +369,7 @@ class WalletController extends Controller
                         DB::table('wallet_transactions')->insert([
                             'wallet_id' => $driverWallet->id,
                             'type' => 'credit',
-                            'source' => 'ride_earnings',
+                            'source' => $ride->service_type === 'livraison' ? 'delivery_earnings' : 'ride_earnings',
                             'amount' => $earnings,
                             'balance_before' => $dBefore,
                             'balance_after' => $dAfter,

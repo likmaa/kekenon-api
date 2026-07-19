@@ -53,6 +53,12 @@ class RideRequested implements ShouldBroadcast
             'fare' => (int) ($this->ride->fare_amount ?? 0),
             'pricing_mode' => $this->ride->pricing_mode ?? 'fixed',
             'service_type' => $this->ride->service_type ?? 'course',
+            'recipient_name' => $this->ride->recipient_name,
+            'recipient_phone' => $this->ride->recipient_phone,
+            'package_description' => $this->ride->package_description,
+            'package_size' => $this->ride->package_size,
+            'package_weight' => $this->ride->package_weight,
+            'is_fragile' => (bool) $this->ride->is_fragile,
             'rider_id' => $this->ride->rider_id,
             'passenger' => [
                 'name' => $this->ride->passenger_name,
@@ -68,4 +74,3 @@ class RideRequested implements ShouldBroadcast
         ];
     }
 }
-

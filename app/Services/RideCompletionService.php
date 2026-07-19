@@ -184,10 +184,18 @@ class RideCompletionService
             // Tarif final
             $luggageCount = (int) ($ride->luggage_count ?? ($ride->has_baggage ? 1 : 0));
             $luggageFee = $luggageCount * ($pricing['luggage_unit_price'] ?? 500);
+            $deliveryBreakdown = ['size_fee' => 0, 'fragile_fee' => 0, 'weight_fee' => 0, 'total' => 0];
+            if ($ride->service_type === 'livraison') {
+                $deliveryBreakdown = app(DeliveryPricingService::class)->breakdown(
+                    $ride->package_size,
+                    $ride->package_weight,
+                    (bool) $ride->is_fragile
+                );
+            }
 
             $originalFare = $ride->negotiated_fare !== null 
                 ? (int) $ride->negotiated_fare 
-                : ($trajectoryPrice + $timeFare + $stopPrice + $pickupWaitingPrice + $luggageFee);
+                : ($trajectoryPrice + $timeFare + $stopPrice + $pickupWaitingPrice + $luggageFee + $deliveryBreakdown['total']);
 
             // La remise est figée lors de la commande. On ne la recalcule jamais à
             // la complétion : un changement de promo ou de grille ne doit pas modifier
@@ -216,6 +224,10 @@ class RideCompletionService
                 'stop_fare' => $stopPrice,
                 'pickup_waiting_fare' => $pickupWaitingPrice,
                 'luggage_fare' => $luggageFee,
+                'delivery_size_fare' => $deliveryBreakdown['size_fee'],
+                'delivery_fragile_fare' => $deliveryBreakdown['fragile_fee'],
+                'delivery_weight_fare' => $deliveryBreakdown['weight_fee'],
+                'delivery_fare' => $deliveryBreakdown['total'],
                 'original_fare' => $originalFare,
                 'discount_amount' => $discountAmount,
                 'total_fare' => $fare,
@@ -372,8 +384,8 @@ class RideCompletionService
             if ($passenger) {
                 $this->fcm->sendToUser(
                     $passenger,
-                    'Course terminée !',
-                    "Merci d'avoir voyagé avec TIC. Tarif: " . number_format($result['ride']->fare_amount, 0, ',', ' ') . ' FCFA',
+                    $result['ride']->service_type === 'livraison' ? 'Livraison terminée !' : 'Course terminée !',
+                    ($result['ride']->service_type === 'livraison' ? 'Votre colis a été livré.' : "Merci d'avoir voyagé avec Kêkênon.").' Tarif : '.number_format($result['ride']->fare_amount, 0, ',', ' ').' FCFA',
                     ['ride_id' => (string) $result['ride']->id, 'type' => 'ride_completed']
                 );
             }

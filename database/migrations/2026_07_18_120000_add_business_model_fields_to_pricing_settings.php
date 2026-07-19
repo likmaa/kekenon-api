@@ -10,7 +10,7 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('pricing_settings', function (Blueprint $table) {
-            $table->unsignedInteger('passenger_app_fee')->default(25)->after('min_fare');
+            $table->unsignedInteger('passenger_app_fee')->default(50)->after('min_fare');
             $table->unsignedInteger('driver_pack_price')->default(500)->after('passenger_app_fee');
             $table->unsignedInteger('driver_pack_rides')->default(10)->after('driver_pack_price');
         });

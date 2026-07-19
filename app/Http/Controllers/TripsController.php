@@ -8,6 +8,8 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Hash;
 use App\Events\DriverLocationUpdated;
 use App\Events\RideAccepted;
 use App\Events\RideTaken;
@@ -25,6 +27,7 @@ use App\Models\FcmToken;
 use App\Services\FcmService;
 use App\Services\PassengerBonusService;
 use App\Services\RideService;
+use App\Services\DeliveryPricingService;
 
 use App\Models\PricingSetting;
 
@@ -37,7 +40,11 @@ class TripsController extends Controller
     protected $rideService;
     protected $passengerBonusService;
 
-    public function __construct(RideService $rideService, PassengerBonusService $passengerBonusService)
+    public function __construct(
+        RideService $rideService,
+        PassengerBonusService $passengerBonusService,
+        protected DeliveryPricingService $deliveryPricing,
+    )
     {
         $this->rideService = $rideService;
         $this->passengerBonusService = $passengerBonusService;
@@ -126,6 +133,10 @@ class TripsController extends Controller
             'duration_s' => ['required', 'numeric', 'min:1', 'max:86400'],
             'vehicle_type' => ['nullable', 'string', 'in:standard,vip'],
             'luggage_count' => ['nullable', 'integer', 'min:0', 'max:3'],
+            'service_type' => ['nullable', 'string', 'in:course,livraison'],
+            'package_size' => ['nullable', 'string', 'in:small,medium,large'],
+            'package_weight' => ['nullable', 'numeric', 'min:0', 'max:50'],
+            'is_fragile' => ['nullable', 'boolean'],
         ]);
 
         $vehicleType = $request->input('vehicle_type', 'standard');
@@ -144,6 +155,15 @@ class TripsController extends Controller
             (float) $request->input('dropoff.lng'),
             (int) $duration
         );
+        $deliveryBreakdown = ['size_fee' => 0, 'fragile_fee' => 0, 'weight_fee' => 0, 'total' => 0];
+        if ($request->input('service_type') === 'livraison') {
+            $deliveryBreakdown = $this->deliveryPricing->breakdown(
+                $request->input('package_size'),
+                $request->input('package_weight'),
+                (bool) $request->boolean('is_fragile')
+            );
+            $price += $deliveryBreakdown['total'];
+        }
 
         $user = Auth::guard('sanctum')->user();
         $eligibleForFirstRideDiscount = $this->passengerBonusService->isEligible($user);
@@ -157,6 +177,7 @@ class TripsController extends Controller
             'eta_s' => (int) round($duration),
             'distance_m' => (int) round($distance),
             'eligible_first_ride_discount' => $eligibleForFirstRideDiscount,
+            'delivery_fee_breakdown' => $deliveryBreakdown,
         ]);
     }
 
@@ -169,6 +190,10 @@ class TripsController extends Controller
             'dropoff.lng'  => ['required', 'numeric', 'between:-180,180'],
             'vehicle_type' => ['nullable', 'string', 'in:standard,vip'],
             'luggage_count' => ['nullable', 'integer', 'min:0', 'max:3'],
+            'service_type' => ['nullable', 'string', 'in:course,livraison'],
+            'package_size' => ['nullable', 'string', 'in:small,medium,large'],
+            'package_weight' => ['nullable', 'numeric', 'min:0', 'max:50'],
+            'is_fragile' => ['nullable', 'boolean'],
         ]);
 
         $vehicleType  = $request->input('vehicle_type', 'standard');
@@ -240,6 +265,15 @@ class TripsController extends Controller
             $dropLng,
             (int) round($duration ?? 0)
         );
+        $deliveryBreakdown = ['size_fee' => 0, 'fragile_fee' => 0, 'weight_fee' => 0, 'total' => 0];
+        if ($request->input('service_type') === 'livraison') {
+            $deliveryBreakdown = $this->deliveryPricing->breakdown(
+                $request->input('package_size'),
+                $request->input('package_weight'),
+                (bool) $request->boolean('is_fragile')
+            );
+            $totalPrice += $deliveryBreakdown['total'];
+        }
 
         $user = Auth::guard('sanctum')->user();
         $eligibleForFirstRideDiscount = $this->passengerBonusService->isEligible($user);
@@ -255,6 +289,7 @@ class TripsController extends Controller
             'geometry'   => $geometry,
             'source'     => $source,
             'eligible_first_ride_discount' => $eligibleForFirstRideDiscount,
+            'delivery_fee_breakdown' => $deliveryBreakdown,
         ]);
     }
 
@@ -284,8 +319,8 @@ class TripsController extends Controller
                 'pickup_lat' => ['required', 'numeric', 'between:-90,90'],
                 'pickup_lng' => ['required', 'numeric', 'between:-180,180'],
                 'pickup_label' => ['nullable', 'string', 'max:255'],
-                'dropoff_lat' => ['nullable', 'numeric', 'between:-90,90'],
-                'dropoff_lng' => ['nullable', 'numeric', 'between:-180,180'],
+                'dropoff_lat' => ['required_if:service_type,livraison', 'nullable', 'numeric', 'between:-90,90'],
+                'dropoff_lng' => ['required_if:service_type,livraison', 'nullable', 'numeric', 'between:-180,180'],
                 'dropoff_label' => ['nullable', 'string', 'max:255'],
                 'distance_m' => ['nullable', 'numeric', 'min:0', 'max:600000'],
                 'duration_s' => ['nullable', 'numeric', 'min:0', 'max:86400'],
@@ -299,10 +334,11 @@ class TripsController extends Controller
                 'luggage_count' => ['nullable', 'integer', 'min:0', 'max:5'],
                 'payment_method' => ['nullable', 'string', 'in:cash,wallet,card,qr,mobile_money,bonus'],
                 'service_type' => ['nullable', 'string', 'in:course,livraison'],
-                'recipient_name' => ['nullable', 'string', 'max:255'],
-                'recipient_phone' => ['nullable', 'string', 'max:255'],
-                'package_description' => ['nullable', 'string'],
-                'package_weight' => ['nullable', 'string'],
+                'recipient_name' => ['required_if:service_type,livraison', 'nullable', 'string', 'min:2', 'max:255'],
+                'recipient_phone' => ['required_if:service_type,livraison', 'nullable', 'string', 'max:30', 'regex:/^[0-9+ ]{8,30}$/'],
+                'package_description' => ['required_if:service_type,livraison', 'nullable', 'string', 'min:2', 'max:1000'],
+                'package_size' => ['required_if:service_type,livraison', 'nullable', 'string', 'in:small,medium,large'],
+                'package_weight' => ['nullable', 'numeric', 'min:0', 'max:50'],
                 'is_fragile' => ['nullable'],
                 'rider_voice_note' => ['nullable', 'string', 'max:2000'],
                 'rider_voice_audio' => ['nullable', 'file', 'max:15360'],
@@ -329,6 +365,7 @@ class TripsController extends Controller
             $recipientName = $v['recipient_name'] ?? null;
             $recipientPhone = $v['recipient_phone'] ?? null;
             $packageDescription = $v['package_description'] ?? null;
+            $packageSize = $v['package_size'] ?? null;
             $packageWeight = $v['package_weight'] ?? null;
             $isFragile = filter_var($v['is_fragile'] ?? false, FILTER_VALIDATE_BOOLEAN);
             $passengerName = $v['passenger_name'] ?? null;
@@ -339,8 +376,8 @@ class TripsController extends Controller
                 'pickup.lat' => ['required', 'numeric', 'between:-90,90'],
                 'pickup.lng' => ['required', 'numeric', 'between:-180,180'],
                 'pickup.label' => ['nullable', 'string', 'max:255'],
-                'dropoff.lat' => ['nullable', 'numeric', 'between:-90,90'],
-                'dropoff.lng' => ['nullable', 'numeric', 'between:-180,180'],
+                'dropoff.lat' => ['required_if:service_type,livraison', 'nullable', 'numeric', 'between:-90,90'],
+                'dropoff.lng' => ['required_if:service_type,livraison', 'nullable', 'numeric', 'between:-180,180'],
                 'dropoff.label' => ['nullable', 'string', 'max:255'],
                 'distance_m' => ['nullable', 'numeric', 'min:0', 'max:600000'],
                 'duration_s' => ['nullable', 'numeric', 'min:0', 'max:86400'],
@@ -354,10 +391,11 @@ class TripsController extends Controller
                 'luggage_count' => ['nullable', 'integer', 'min:0', 'max:5'],
                 'payment_method' => ['nullable', 'string', 'in:cash,wallet,card,qr,mobile_money,bonus'],
                 'service_type' => ['nullable', 'string', 'in:course,livraison'],
-                'recipient_name' => ['nullable', 'string', 'max:255'],
-                'recipient_phone' => ['nullable', 'string', 'max:255'],
-                'package_description' => ['nullable', 'string'],
-                'package_weight' => ['nullable', 'string'],
+                'recipient_name' => ['required_if:service_type,livraison', 'nullable', 'string', 'min:2', 'max:255'],
+                'recipient_phone' => ['required_if:service_type,livraison', 'nullable', 'string', 'max:30', 'regex:/^[0-9+ ]{8,30}$/'],
+                'package_description' => ['required_if:service_type,livraison', 'nullable', 'string', 'min:2', 'max:1000'],
+                'package_size' => ['required_if:service_type,livraison', 'nullable', 'string', 'in:small,medium,large'],
+                'package_weight' => ['nullable', 'numeric', 'min:0', 'max:50'],
                 'is_fragile' => ['nullable', 'boolean'],
                 'rider_voice_note' => ['nullable', 'string', 'max:2000'],
                 'promo_code' => ['nullable', 'string'],
@@ -383,6 +421,7 @@ class TripsController extends Controller
             $recipientName = $request->input('recipient_name');
             $recipientPhone = $request->input('recipient_phone');
             $packageDescription = $request->input('package_description');
+            $packageSize = $request->input('package_size');
             $packageWeight = $request->input('package_weight');
             $isFragile = (bool) $request->input('is_fragile', false);
             $passengerName = $request->input('passenger_name');
@@ -403,7 +442,7 @@ class TripsController extends Controller
         }
 
         try {
-            return DB::transaction(function () use ($user, $isMultipart, $v, $request, $pickupLat, $pickupLng, $pickupLabel, $dropoffLat, $dropoffLng, $dropoffLabel, $distanceM, $durationS, $orderMode, $durationHours, $vehicleType, $hasBaggage, $luggageCount, $paymentMethod, $serviceType, $recipientName, $recipientPhone, $packageDescription, $packageWeight, $isFragile, $passengerName, $passengerPhone, $riderVoiceNote, $pricingMode) {
+            return DB::transaction(function () use ($user, $isMultipart, $v, $request, $pickupLat, $pickupLng, $pickupLabel, $dropoffLat, $dropoffLng, $dropoffLabel, $distanceM, $durationS, $orderMode, $durationHours, $vehicleType, $hasBaggage, $luggageCount, $paymentMethod, $serviceType, $recipientName, $recipientPhone, $packageDescription, $packageSize, $packageWeight, $isFragile, $passengerName, $passengerPhone, $riderVoiceNote, $pricingMode) {
 
                 // SEC-02 : tarif exclusivement calcule cote serveur (distance client + grilles ; le champ price est ignore).
                 if ($orderMode === 'duration' && $durationHours) {
@@ -437,6 +476,13 @@ class TripsController extends Controller
                         $dropoffLng,
                         (int) $durationS
                     );
+                    if ($serviceType === 'livraison') {
+                        $fareAmount += $this->deliveryPricing->breakdown(
+                            $packageSize,
+                            $packageWeight,
+                            $isFragile
+                        )['total'];
+                    }
                 }
 
                 $promoCodeStr = $isMultipart ? ($v['promo_code'] ?? null) : $request->input('promo_code');
@@ -492,6 +538,8 @@ class TripsController extends Controller
                 }
                 $fareAmount = max(0, $originalFareAmount - $discountAmount);
 
+                $deliveryCode = $serviceType === 'livraison' ? (string) random_int(1000, 9999) : null;
+
                 $ride = Ride::create([
                     'rider_id' => $user?->id,
                     'driver_id' => null,
@@ -524,8 +572,11 @@ class TripsController extends Controller
                     'recipient_name' => $recipientName,
                     'recipient_phone' => $recipientPhone,
                     'package_description' => $packageDescription,
+                    'package_size' => $packageSize,
                     'package_weight' => $packageWeight,
                     'is_fragile' => $isFragile,
+                    'delivery_code_hash' => $deliveryCode ? Hash::make($deliveryCode) : null,
+                    'delivery_code_encrypted' => $deliveryCode ? Crypt::encryptString($deliveryCode) : null,
                     'rider_voice_note' => $riderVoiceNote,
                     'rider_voice_audio_path' => null,
                     'declined_driver_ids' => [],
@@ -566,6 +617,9 @@ class TripsController extends Controller
                     ...$this->calculateRideFareBreakdown($ride),
                     'vehicle_type' => $ride->vehicle_type,
                     'has_baggage' => (bool) $ride->has_baggage,
+                    'service_type' => $ride->service_type,
+                    ...$this->deliveryFields($ride),
+                    'delivery_code' => $this->deliveryCodeForPassenger($ride),
                     'pricing_mode' => $ride->pricing_mode,
                 ], 201);
             });
@@ -678,12 +732,15 @@ class TripsController extends Controller
                 // Course négociable : le passager doit d'abord confirmer le chauffeur
                 // (négociation verbale). Course fixe : le chauffeur est déjà en route.
                 $isNegotiable = ($ride->pricing_mode ?? 'fixed') === 'negotiable';
+                $isDelivery = $ride->service_type === 'livraison';
                 $fcm->sendToUser(
                     $passenger,
-                    $isNegotiable ? "Un chauffeur a pris votre course" : "Course acceptée !",
+                    $isNegotiable
+                        ? ($isDelivery ? 'Un zem propose de livrer votre colis' : 'Un zem a pris votre course')
+                        : ($isDelivery ? 'Livraison acceptée !' : 'Course acceptée !'),
                     $isNegotiable
                         ? $driver->name . " souhaite vous prendre. Confirmez après accord sur le prix."
-                        : "Votre chauffeur " . $driver->name . " est en route.",
+                        : "Votre zem " . $driver->name . ($isDelivery ? ' part récupérer le colis.' : ' est en route.'),
                     [
                         'ride_id' => (string) $ride->id,
                         'type' => $isNegotiable ? 'ride_negotiation_pending' : 'ride_accepted',
@@ -965,8 +1022,8 @@ class TripsController extends Controller
                 $fcm = app(FcmService::class);
                 $fcm->sendToUser(
                     $passenger,
-                    "C'est parti !",
-                    "Votre course a commencé. Bon voyage !",
+                    $ride->service_type === 'livraison' ? 'Colis récupéré !' : "C'est parti !",
+                    $ride->service_type === 'livraison' ? 'Votre colis est maintenant en route vers le destinataire.' : 'Votre course a commencé. Bon voyage !',
                     ['ride_id' => (string) $ride->id, 'type' => 'ride_started']
                 );
             }
@@ -1014,12 +1071,26 @@ class TripsController extends Controller
             ], 422);
         }
 
+        if ($ride->service_type === 'livraison') {
+            $data = $request->validate([
+                'delivery_code' => ['required', 'digits:4'],
+            ]);
+            if (! $ride->delivery_code_hash || ! Hash::check((string) $data['delivery_code'], $ride->delivery_code_hash)) {
+                return $this->apiError('INVALID_DELIVERY_CODE', 'Le code de confirmation est incorrect.', 422);
+            }
+        }
+
         try {
             // Logique de complétion centralisée (partagée avec l'admin) — voir RideCompletionService
             $result = app(\App\Services\RideCompletionService::class)->complete(
                 $ride,
                 $request->has('distance_m') ? (int) $request->input('distance_m') : null
             );
+
+            if ($result['ride']->service_type === 'livraison') {
+                $result['ride']->delivery_confirmed_at = now();
+                $result['ride']->save();
+            }
 
             return response()->json([
                 'ok' => true,
@@ -1078,8 +1149,8 @@ class TripsController extends Controller
                 $fcm = app(FcmService::class);
                 $fcm->sendToUser(
                     $passenger,
-                    "Course annulée",
-                    "Le chauffeur a annulé la course.",
+                    $ride->service_type === 'livraison' ? 'Livraison annulée' : 'Course annulée',
+                    $ride->service_type === 'livraison' ? 'Le zem a annulé la livraison.' : 'Le zem a annulé la course.',
                     ['ride_id' => (string) $ride->id, 'type' => 'ride_cancelled']
                 );
             }
@@ -1116,8 +1187,8 @@ class TripsController extends Controller
                 $fcm = app(FcmService::class);
                 $fcm->sendToUser(
                     $driver,
-                    "Course annulée",
-                    "Le passager a annulé la course.",
+                    $ride->service_type === 'livraison' ? 'Livraison annulée' : 'Course annulée',
+                    $ride->service_type === 'livraison' ? "L'expéditeur a annulé la livraison." : 'Le passager a annulé la course.',
                     ['ride_id' => (string) $ride->id, 'type' => 'ride_cancelled']
                 );
             }
@@ -1251,6 +1322,7 @@ class TripsController extends Controller
             $breakdown = $this->calculateRideFareBreakdown($ride);
             $ride->fare_amount = $breakdown['total_fare'];
             $data = array_merge($ride->toArray(), $breakdown);
+            $data['delivery_code'] = $this->deliveryCodeForPassenger($ride);
             return response()->json($data);
         }
         return response()->json($ride);
@@ -1357,6 +1429,9 @@ class TripsController extends Controller
             'payment_method' => $ride->payment_method,
             'payment_status' => $ride->payment_status,
             'payment_link' => $ride->payment_link,
+            'service_type' => $ride->service_type,
+            ...$this->deliveryFields($ride),
+            'delivery_code' => $this->deliveryCodeForPassenger($ride),
             // Négociation : nécessaire pour router le passager vers l'écran
             // Confirmer/Refuser (verbal) au lieu du suivi direct.
             'pricing_mode' => $ride->pricing_mode ?? 'fixed',
@@ -1537,6 +1612,7 @@ class TripsController extends Controller
             'duration_s' => (int) ($ride->duration_s ?? 0),
             'distance_m' => (int) ($ride->distance_m ?? 0),
             'service_type' => $ride->service_type,
+            ...$this->deliveryFields($ride),
             'accepted_at' => $ride->accepted_at,
             'started_at' => $ride->started_at,
             'completed_at' => $ride->completed_at,
@@ -1606,6 +1682,7 @@ class TripsController extends Controller
                     'vehicle_type' => $ride->vehicle_type,
                     'has_baggage' => (bool) $ride->has_baggage,
                     'service_type' => $ride->service_type,
+                    ...$this->deliveryFields($ride),
                     'payment_method' => $ride->payment_method,
                     'pricing_mode' => $ride->pricing_mode ?? 'fixed',
                     'negotiated_fare' => $ride->negotiated_fare,
@@ -1671,6 +1748,7 @@ class TripsController extends Controller
                 'vehicle_type' => $ride->vehicle_type,
                 'has_baggage' => (bool) $ride->has_baggage,
                 'service_type' => $ride->service_type,
+                ...$this->deliveryFields($ride),
                 'payment_method' => $ride->payment_method,
                 'pricing_mode' => $ride->pricing_mode ?? 'fixed',
                 'negotiated_fare' => $ride->negotiated_fare,
@@ -2220,6 +2298,7 @@ class TripsController extends Controller
                 'ride_minutes' => (int) ($b['ride_minutes'] ?? 0),
                 'per_min_rate' => (int) ($b['per_min_rate'] ?? 0),
                 'luggage_fare' => (int) ($b['luggage_fare'] ?? 0),
+                'delivery_fare' => (int) ($b['delivery_fare'] ?? 0),
                 'wait_fare' => $stopFare + $pickupWaitingFare,
                 'duration_fare' => $stopFare + $pickupWaitingFare, // Alias for app compatibility
                 'pickup_waiting_fare' => $pickupWaitingFare,
@@ -2300,6 +2379,15 @@ class TripsController extends Controller
         $luggageCount = (int) ($ride->luggage_count ?? ($ride->has_baggage ? 1 : 0));
         $luggagePrice = $luggageCount * ($pricing['luggage_unit_price'] ?? 500);
         $totalFare += $luggagePrice;
+        $deliveryBreakdown = ['size_fee' => 0, 'fragile_fee' => 0, 'weight_fee' => 0, 'total' => 0];
+        if ($ride->service_type === 'livraison') {
+            $deliveryBreakdown = $this->deliveryPricing->breakdown(
+                $ride->package_size,
+                $ride->package_weight,
+                (bool) $ride->is_fragile
+            );
+            $totalFare += $deliveryBreakdown['total'];
+        }
 
         return [
             'base_fare' => $baseFare,
@@ -2308,6 +2396,8 @@ class TripsController extends Controller
             'ride_minutes' => $rideMinutes,
             'per_min_rate' => (int) ($pricing['per_min'] ?? 5),
             'luggage_fare' => $luggagePrice,
+            'delivery_fare' => $deliveryBreakdown['total'],
+            'delivery_fee_breakdown' => $deliveryBreakdown,
             'wait_fare' => $stopPrice + $pickupWaitingPrice,
             'duration_fare' => $stopPrice + $pickupWaitingPrice, // Alias for app compatibility
             'pickup_waiting_fare' => $pickupWaitingPrice,
@@ -2327,6 +2417,36 @@ class TripsController extends Controller
             return $nowTime >= $start && $nowTime <= $end;
         } else {
             return $nowTime >= $start || $nowTime <= $end;
+        }
+    }
+
+    /** @return array<string, mixed> */
+    protected function deliveryFields(Ride $ride): array
+    {
+        if ($ride->service_type !== 'livraison') {
+            return [];
+        }
+
+        return [
+            'recipient_name' => $ride->recipient_name,
+            'recipient_phone' => $ride->recipient_phone,
+            'package_description' => $ride->package_description,
+            'package_size' => $ride->package_size,
+            'package_weight' => $ride->package_weight,
+            'is_fragile' => (bool) $ride->is_fragile,
+        ];
+    }
+
+    protected function deliveryCodeForPassenger(Ride $ride): ?string
+    {
+        if ($ride->service_type !== 'livraison' || ! $ride->delivery_code_encrypted) {
+            return null;
+        }
+
+        try {
+            return Crypt::decryptString($ride->delivery_code_encrypted);
+        } catch (\Throwable) {
+            return null;
         }
     }
 

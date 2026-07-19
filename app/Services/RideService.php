@@ -109,11 +109,12 @@ class RideService
             if (! empty($nearbyDriverTokens)) {
                 $this->fcm->sendToTokens(
                     $nearbyDriverTokens,
-                    'Nouvelle commande !',
-                    'Une course à '.number_format($ride->fare_amount, 0, ',', ' ').' FCFA est disponible à proximité.',
+                    $ride->service_type === 'livraison' ? 'Nouvelle livraison !' : 'Nouvelle course !',
+                    ($ride->service_type === 'livraison' ? 'Une livraison' : 'Une course').' à '.number_format($ride->fare_amount, 0, ',', ' ').' FCFA est disponible à proximité.',
                     [
                         'ride_id' => (string) $ride->id,
                         'type' => 'new_ride',
+                        'service_type' => (string) ($ride->service_type ?? 'course'),
                         'pickup_address' => (string) $ride->pickup_address,
                         'fare' => (string) $ride->fare_amount,
                         'rider_voice_note' => $ride->rider_voice_note

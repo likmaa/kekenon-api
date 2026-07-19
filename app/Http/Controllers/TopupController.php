@@ -330,7 +330,7 @@ class TopupController extends Controller
                 DB::table('wallet_transactions')->insert([
                     'wallet_id' => $driverWallet->id,
                     'type' => 'credit',
-                    'source' => 'ride_earnings',
+                    'source' => $ride->service_type === 'livraison' ? 'delivery_earnings' : 'ride_earnings',
                     'amount' => $earnings,
                     'balance_before' => $dBefore,
                     'balance_after' => $dAfter,

@@ -55,6 +55,7 @@ class PricingController extends Controller
             'pickup_grace_period_m' => (int) ($setting->pickup_grace_period_m ?? 5),
             'pickup_waiting_rate_per_min' => (int) ($setting->pickup_waiting_rate_per_min ?? 10),
             'business_model' => $this->economicModel->get(),
+            'delivery' => app(\App\Services\DeliveryPricingService::class)->config($setting),
             'zones' => $setting->zones ?? [],
             'peak_hours' => [
                 'enabled' => (bool) $setting->peak_hours_enabled,
@@ -106,6 +107,13 @@ class PricingController extends Controller
             'business_model.passenger_app_fee' => ['sometimes', 'integer', 'min:0', 'max:10000'],
             'business_model.driver_pack_price' => ['sometimes', 'integer', 'min:0', 'max:1000000'],
             'business_model.driver_pack_rides' => ['sometimes', 'integer', 'min:1', 'max:10000'],
+            'delivery' => ['sometimes', 'array'],
+            'delivery.small_fee' => ['sometimes', 'integer', 'min:0', 'max:100000'],
+            'delivery.medium_fee' => ['sometimes', 'integer', 'min:0', 'max:100000'],
+            'delivery.large_fee' => ['sometimes', 'integer', 'min:0', 'max:100000'],
+            'delivery.fragile_fee' => ['sometimes', 'integer', 'min:0', 'max:100000'],
+            'delivery.weight_threshold_kg' => ['sometimes', 'integer', 'min:0', 'max:100'],
+            'delivery.extra_kg_fee' => ['sometimes', 'integer', 'min:0', 'max:100000'],
             'zones' => ['sometimes', 'array'],
             'peak_hours' => ['sometimes', 'array'],
             'peak_hours.enabled' => ['sometimes', 'boolean'],
@@ -165,6 +173,21 @@ class PricingController extends Controller
             }
             if (array_key_exists('driver_pack_rides', $businessModel)) {
                 $setting->driver_pack_rides = (int) $businessModel['driver_pack_rides'];
+            }
+        }
+        if (array_key_exists('delivery', $data)) {
+            $delivery = $data['delivery'];
+            foreach ([
+                'small_fee' => 'delivery_small_fee',
+                'medium_fee' => 'delivery_medium_fee',
+                'large_fee' => 'delivery_large_fee',
+                'fragile_fee' => 'delivery_fragile_fee',
+                'weight_threshold_kg' => 'delivery_weight_threshold_kg',
+                'extra_kg_fee' => 'delivery_extra_kg_fee',
+            ] as $input => $column) {
+                if (array_key_exists($input, $delivery)) {
+                    $setting->{$column} = (int) $delivery[$input];
+                }
             }
         }
         if (array_key_exists('zones', $data)) {

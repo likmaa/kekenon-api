@@ -31,6 +31,7 @@ class RidesController extends Controller
         $driverId = $request->query('driver_id');
         $passengerId = $request->query('passenger_id');
         $reference = $request->query('reference');
+        $serviceType = $request->query('service_type');
         $from = $request->query('from');
         $to = $request->query('to');
         $perPage = (int) $request->query('per_page', 20);
@@ -54,6 +55,9 @@ class RidesController extends Controller
         }
         if ($reference) {
             $query->where('id', $reference);
+        }
+        if (in_array($serviceType, ['course', 'livraison'], true)) {
+            $query->where('service_type', $serviceType);
         }
         if ($from) {
             $query->whereDate('created_at', '>=', $from);
@@ -83,6 +87,13 @@ class RidesController extends Controller
                 'completed_at' => $ride->completed_at,
                 'cancelled_at' => $ride->cancelled_at,
                 'declined_driver_ids' => $ride->declined_driver_ids ?? [],
+                'service_type' => $ride->service_type ?? 'course',
+                'recipient_name' => $ride->recipient_name,
+                'recipient_phone' => $ride->recipient_phone,
+                'package_description' => $ride->package_description,
+                'package_size' => $ride->package_size,
+                'package_weight' => $ride->package_weight,
+                'is_fragile' => (bool) $ride->is_fragile,
                 'driver' => $ride->driver ? [
                     'id' => $ride->driver->id,
                     'name' => $ride->driver->name,

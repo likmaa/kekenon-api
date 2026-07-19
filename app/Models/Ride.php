@@ -51,8 +51,12 @@ class Ride extends Model
         'recipient_name',
         'recipient_phone',
         'package_description',
+        'package_size',
         'package_weight',
         'is_fragile',
+        'delivery_code_hash',
+        'delivery_code_encrypted',
+        'delivery_confirmed_at',
         'luggage_count',
         'has_baggage',
         'payment_status',
@@ -68,6 +72,11 @@ class Ride extends Model
         'negotiation_confirmed_at',
     ];
 
+    protected $hidden = [
+        'delivery_code_hash',
+        'delivery_code_encrypted',
+    ];
+
 
     protected $casts = [
         'accepted_at' => 'datetime',
@@ -80,6 +89,8 @@ class Ride extends Model
         'declined_driver_ids' => 'array',
         'breakdown' => 'array',
         'has_baggage' => 'boolean',
+        'is_fragile' => 'boolean',
+        'delivery_confirmed_at' => 'datetime',
     ];
 
     /**

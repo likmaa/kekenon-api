@@ -7,7 +7,7 @@ use App\Models\PricingSetting;
 /** Source de vérité du modèle économique Kêkênon. */
 class EconomicModelService
 {
-    public const DEFAULT_PASSENGER_APP_FEE = 25;
+    public const DEFAULT_PASSENGER_APP_FEE = 50;
     public const DEFAULT_DRIVER_PACK_PRICE = 500;
     public const DEFAULT_DRIVER_PACK_RIDES = 10;
 
